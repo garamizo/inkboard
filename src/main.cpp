@@ -23,6 +23,10 @@
 GxEPD2_BW<GxEPD2_750_T7, GxEPD2_750_T7::HEIGHT> display(
     GxEPD2_750_T7(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY));
 
+// Reset pulse for the Waveshare HAT. Its reset circuit needs a short pulse;
+// 10 ms (GxEPD2's default) can leave the controller holding BUSY LOW.
+constexpr int EPD_RESET_MS = 2;
+
 static int wifiNetworks = -1;
 static String bestSsid;
 static int bestRssi = 0;
@@ -112,7 +116,7 @@ static bool checkBusyLine() {
   digitalWrite(PIN_EPD_PWR, HIGH);
   delay(100);
   digitalWrite(PIN_EPD_RST, LOW);
-  delay(10);
+  delay(EPD_RESET_MS);
   digitalWrite(PIN_EPD_RST, HIGH);
   pinMode(PIN_EPD_BUSY, INPUT);
   uint32_t t = millis();
@@ -180,7 +184,7 @@ static bool controllerResponds(const SpiPins& p, bool threeWire) {
   }
   pinMode(PIN_EPD_BUSY, INPUT);
   digitalWrite(PIN_EPD_RST, LOW);
-  delay(10);
+  delay(EPD_RESET_MS);
   digitalWrite(PIN_EPD_RST, HIGH);
   delay(20);
   bool idleBefore = waitBusy(HIGH, 200);
@@ -318,8 +322,9 @@ static void runDisplayTest() {
   digitalWrite(PIN_EPD_PWR, HIGH);
   delay(10);
 
-  // 2 ms reset pulse is required by the Waveshare HAT's reset circuit.
-  display.init(115200, true, 2, false);
+  // Short reset pulse: the Waveshare HAT's reset circuit misbehaves with the
+  // default 10 ms (GxEPD2 calls it the "clever" reset circuit).
+  display.init(115200, true, EPD_RESET_MS, false);
   display.setRotation(0);
 
   uint32_t t = millis();
@@ -348,15 +353,19 @@ static void runDisplayTest() {
   Serial.println("Press BOOT to run it again.");
 }
 
-// The refresh test only makes sense once the controller answers; without it
-// every refresh just waits out GxEPD2's 10 s busy timeout.
+// Without a powered controller every refresh just waits out GxEPD2's 10 s
+// busy timeout, so only an undriven BUSY line skips the display test.
 static void runPanelChecks() {
-  if (checkBusyLine() && checkCommandResponse()) {
-    runDisplayTest();
-  } else {
+  if (!checkBusyLine()) {
     digitalWrite(PIN_EPD_PWR, LOW);
     Serial.println("Skipping the display test. Fix the wiring, then press BOOT to retest.");
+    return;
   }
+  if (!checkCommandResponse()) {
+    Serial.println("Running the display test anyway: GxEPD2 has the full init sequence,\n"
+                   "so it is the final word. Busy Timeout lines there confirm the fault.");
+  }
+  runDisplayTest();
 }
 
 void setup() {
