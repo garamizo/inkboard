@@ -1,5 +1,5 @@
 // Minimal e-paper check, following the kit's reference firmware
-// (github.com/VoIPshare/ESP32-eInk-Dashboard) line for line: PWR HIGH,
+// (github.com/VoIPshare/ESP32-eInk-Dashboard) closely: PWR HIGH,
 // 50 ms, SPI.begin, init(115200, true, 2, false), one full refresh.
 // No diagnostics of our own, so any failure is the hardware or the pin map.
 //
@@ -32,7 +32,16 @@ void setup() {
   digitalWrite(P_PWR, HIGH);
   delay(50);
 
-  SPI.begin(P_SCK, -1, P_MOSI, P_CS);
+  // GxEPD2 writes CS/DC/RST before configuring them, which Arduino-ESP32 3.x
+  // logs as an error; configure them first.
+  for (int pin : {P_CS, P_DC, P_RST}) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, HIGH);
+  }
+
+  // CS stays a plain GPIO that GxEPD2 toggles itself (the reference passes it
+  // to SPI.begin, which hands it to the SPI peripheral).
+  SPI.begin(P_SCK, -1, P_MOSI, -1);
   display.init(115200, true, 2, false);
   display.setRotation(0);
   display.setFullWindow();

@@ -379,12 +379,12 @@ void setup() {
   digitalWrite(PIN_EPD_PWR, HIGH);
   pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
 
-  // GxEPD2 writes CS/DC before configuring them, which Arduino-ESP32 3.x
+  // GxEPD2 writes CS/DC/RST before configuring them, which Arduino-ESP32 3.x
   // logs as an error; configure them first.
-  pinMode(PIN_EPD_CS, OUTPUT);
-  digitalWrite(PIN_EPD_CS, HIGH);
-  pinMode(PIN_EPD_DC, OUTPUT);
-  digitalWrite(PIN_EPD_DC, HIGH);
+  for (int pin : {PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST}) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, HIGH);
+  }
 
   // Hardware SPI on our own pins. No MISO (the panel is write-only), and CS
   // stays a plain GPIO that GxEPD2 toggles itself.
