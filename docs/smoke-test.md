@@ -34,7 +34,9 @@ PASS: 7 network(s) found
    ...
 
 === e-Paper wiring ===
-PASS: BUSY reads HIGH (controller idle) after reset
+BUSY with HAT power off: floating
+BUSY with HAT power on, after reset: driven HIGH
+PASS: controller is powered and idle
 
 === e-Paper panel ===
 Full refresh (all black): ~4000 ms
@@ -74,7 +76,9 @@ Press **BOOT** to repeat the display test.
 | No `/dev/ttyACM0` | Charge-only USB cable; try another cable or port. |
 | `Permission denied` on the port | You are not in the `dialout` group (see [toolchain.md](toolchain.md)). |
 | No serial output after flashing | Press RESET. The monitor attached after the first lines were printed. |
-| `FAIL: BUSY stuck LOW` | HAT not powered (VCC/GND/PWR), BUSY wire loose, or ribbon not latched. |
+| `nothing drives BUSY` (floating) | BUSY wire not on GPIO3, or the controller is unpowered: measure 3.3 V between HAT VCC and GND, check PWR → GPIO1, reseat the ribbon. |
+| `BUSY held LOW` | Controller stuck in reset/busy (check RST → GPIO2), a solder bridge to GND, or wrong switch settings. |
+| `IO 20 is not set as GPIO` log errors | Harmless GxEPD2 quirk, fixed in current firmware. |
 | Panel doesn't change at all, BUSY PASS | DIN/CLK/CS/DC swapped, or Interface Config set to 1. |
 | Faint or washed-out image | Display Config set to A (should be B). |
 | Image garbled or shifted | Wrong panel driver. A 7.5" V1 (640×384) or HD (880×528) needs a different GxEPD2 class. |

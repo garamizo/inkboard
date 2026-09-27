@@ -6,7 +6,7 @@
 //   3. e-Paper wiring: BUSY line behaviour after power-up and reset
 //   4. e-Paper panel: full black, then a test pattern (full refresh),
 //      then a counter updated with partial refreshes
-// Press BOOT to run the display test again.
+// Press BOOT to run the wiring check and display test again.
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -70,27 +70,68 @@ static void checkWifi() {
   WiFi.mode(WIFI_OFF);
 }
 
-// BUSY is driven by the panel controller. With the pull-down enabled, a
-// disconnected wire or an unpowered HAT reads LOW ("busy") forever.
+enum class LineState { DrivenHigh, DrivenLow, Floating };
+
+// Reads BUSY once with the internal pull-up and once with the pull-down.
+// A line the controller actually drives reads the same both ways; an
+// unconnected (or unpowered, high-impedance) line follows the pull.
+static LineState probeBusy() {
+  pinMode(PIN_EPD_BUSY, INPUT_PULLUP);
+  delay(5);
+  bool withPullUp = digitalRead(PIN_EPD_BUSY);
+  pinMode(PIN_EPD_BUSY, INPUT_PULLDOWN);
+  delay(5);
+  bool withPullDown = digitalRead(PIN_EPD_BUSY);
+  pinMode(PIN_EPD_BUSY, INPUT);
+  if (withPullUp && withPullDown) return LineState::DrivenHigh;
+  if (!withPullUp && !withPullDown) return LineState::DrivenLow;
+  return LineState::Floating;
+}
+
+static const char* lineStateName(LineState s) {
+  switch (s) {
+    case LineState::DrivenHigh: return "driven HIGH";
+    case LineState::DrivenLow: return "driven LOW";
+    default: return "floating";
+  }
+}
+
+// The UC8179 drives BUSY HIGH when idle and LOW while working.
 static bool checkBusyLine() {
   banner("e-Paper wiring");
-  pinMode(PIN_EPD_BUSY, INPUT_PULLDOWN);
   pinMode(PIN_EPD_RST, OUTPUT);
+  digitalWrite(PIN_EPD_RST, HIGH);
 
+  digitalWrite(PIN_EPD_PWR, LOW);
+  delay(100);
+  LineState off = probeBusy();
+
+  digitalWrite(PIN_EPD_PWR, HIGH);
+  delay(100);
   digitalWrite(PIN_EPD_RST, LOW);
   delay(10);
   digitalWrite(PIN_EPD_RST, HIGH);
   delay(200);
+  LineState on = probeBusy();
 
-  bool idle = digitalRead(PIN_EPD_BUSY) == HIGH;
-  if (idle) {
-    Serial.println("PASS: BUSY reads HIGH (controller idle) after reset");
-  } else {
-    Serial.println("FAIL: BUSY stuck LOW. Check VCC/GND/PWR/BUSY wires, the ribbon cable\n"
-                   "      latch, and the HAT switches (Display Config = B, Interface = 0).");
+  Serial.printf("BUSY with HAT power off: %s\n", lineStateName(off));
+  Serial.printf("BUSY with HAT power on, after reset: %s\n", lineStateName(on));
+
+  switch (on) {
+    case LineState::DrivenHigh:
+      Serial.println("PASS: controller is powered and idle");
+      return true;
+    case LineState::Floating:
+      Serial.println("FAIL: nothing drives BUSY. Either the BUSY wire does not reach GPIO3,\n"
+                     "      or the panel controller has no power: check HAT VCC = 3.3 V and\n"
+                     "      GND, the PWR wire (GPIO1), and that the ribbon is fully latched.");
+      return false;
+    default:
+      Serial.println("FAIL: BUSY held LOW. The controller is stuck busy or in reset, or BUSY\n"
+                     "      is shorted to GND: check the RST wire (GPIO2), look for solder\n"
+                     "      bridges, and confirm Interface Config = 0, Display Config = B.");
+      return false;
   }
-  pinMode(PIN_EPD_BUSY, INPUT);
-  return idle;
 }
 
 static void drawPattern() {
@@ -197,6 +238,17 @@ static void runDisplayTest() {
   Serial.println("Press BOOT to run it again.");
 }
 
+// The refresh test only makes sense once the controller answers; without it
+// every refresh just waits out GxEPD2's 10 s busy timeout.
+static void runPanelChecks() {
+  if (checkBusyLine()) {
+    runDisplayTest();
+  } else {
+    digitalWrite(PIN_EPD_PWR, LOW);
+    Serial.println("Skipping the display test. Fix the wiring, then press BOOT to retest.");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   // Native USB: wait briefly so the first lines are not lost when a monitor attaches.
@@ -208,13 +260,20 @@ void setup() {
   digitalWrite(PIN_EPD_PWR, HIGH);
   pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
 
-  // Hardware SPI on our own pins (no MISO: the panel is write-only).
-  SPI.begin(PIN_EPD_CLK, -1, PIN_EPD_DIN, PIN_EPD_CS);
+  // GxEPD2 writes CS/DC before configuring them, which Arduino-ESP32 3.x
+  // logs as an error; configure them first.
+  pinMode(PIN_EPD_CS, OUTPUT);
+  digitalWrite(PIN_EPD_CS, HIGH);
+  pinMode(PIN_EPD_DC, OUTPUT);
+  digitalWrite(PIN_EPD_DC, HIGH);
+
+  // Hardware SPI on our own pins. No MISO (the panel is write-only), and CS
+  // stays a plain GPIO that GxEPD2 toggles itself.
+  SPI.begin(PIN_EPD_CLK, -1, PIN_EPD_DIN, -1);
 
   checkMcu();
   checkWifi();
-  checkBusyLine();
-  runDisplayTest();
+  runPanelChecks();
 }
 
 void loop() {
@@ -226,6 +285,6 @@ void loop() {
   if (digitalRead(PIN_BOOT_BTN) == LOW) {
     delay(50);
     while (digitalRead(PIN_BOOT_BTN) == LOW) delay(10);
-    runDisplayTest();
+    runPanelChecks();
   }
 }
