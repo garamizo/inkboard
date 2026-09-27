@@ -9,6 +9,7 @@
 // Press BOOT to run the wiring check and display test again.
 
 #include <Arduino.h>
+#include <algorithm>
 #include <SPI.h>
 #include <WiFi.h>
 #include <GxEPD2_BW.h>
@@ -119,7 +120,8 @@ static bool checkBusyLine() {
 
   switch (on) {
     case LineState::DrivenHigh:
-      Serial.println("PASS: controller is powered and idle");
+      // Not proof of life on its own: a pull-up on the HAT reads the same.
+      Serial.println("PASS: BUSY reads HIGH (idle)");
       return true;
     case LineState::Floating:
       Serial.println("FAIL: nothing drives BUSY. Either the BUSY wire does not reach GPIO3,\n"
@@ -132,6 +134,110 @@ static bool checkBusyLine() {
                      "      bridges, and confirm Interface Config = 0, Display Config = B.");
       return false;
   }
+}
+
+// --- Command-response test -------------------------------------------------
+// Bit-bangs one UC8179 command and watches BUSY. PON (0x04, power on) keeps
+// BUSY LOW for tens of ms while the charge pumps start; POF (0x02) turns them
+// off again. If BUSY never drops, the controller did not get the command.
+
+constexpr uint8_t CMD_POWER_ON = 0x04;
+constexpr uint8_t CMD_POWER_OFF = 0x02;
+
+struct SpiPins { int din, clk, cs, dc; };
+
+static void bitBangCommand(const SpiPins& p, uint8_t cmd, bool threeWire) {
+  digitalWrite(p.cs, LOW);
+  digitalWrite(p.dc, LOW);
+  delayMicroseconds(2);
+  // 3-wire mode (Interface Config = 1) sends a leading D/C bit: 0 = command.
+  int bits = threeWire ? 9 : 8;
+  uint16_t frame = cmd;
+  for (int i = bits - 1; i >= 0; i--) {
+    digitalWrite(p.din, (frame >> i) & 1);
+    delayMicroseconds(2);
+    digitalWrite(p.clk, HIGH);
+    delayMicroseconds(2);
+    digitalWrite(p.clk, LOW);
+  }
+  digitalWrite(p.cs, HIGH);
+}
+
+static bool waitBusy(int level, uint32_t timeoutMs) {
+  for (uint32_t start = millis(); millis() - start < timeoutMs;)
+    if (digitalRead(PIN_EPD_BUSY) == level) return true;
+  return false;
+}
+
+static bool controllerResponds(const SpiPins& p, bool threeWire) {
+  for (int pin : {p.din, p.clk, p.cs, p.dc}) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, pin == p.cs ? HIGH : LOW);
+  }
+  pinMode(PIN_EPD_BUSY, INPUT);
+  digitalWrite(PIN_EPD_RST, LOW);
+  delay(10);
+  digitalWrite(PIN_EPD_RST, HIGH);
+  delay(20);
+  if (!waitBusy(HIGH, 200)) return false;
+
+  bitBangCommand(p, CMD_POWER_ON, threeWire);
+  bool responded = waitBusy(LOW, 200);
+  if (responded) {
+    waitBusy(HIGH, 1000);
+    bitBangCommand(p, CMD_POWER_OFF, threeWire);
+    waitBusy(HIGH, 1000);
+  }
+  return responded;
+}
+
+// Returns true if the controller answers with the wiring in pins.h. If not,
+// tries every assignment of the four signal wires (and 3-wire mode) to find
+// which one the hardware actually has.
+static bool checkCommandResponse() {
+  banner("e-Paper commands");
+  const SpiPins wired = {PIN_EPD_DIN, PIN_EPD_CLK, PIN_EPD_CS, PIN_EPD_DC};
+  bool ok = controllerResponds(wired, false);
+
+  if (ok) {
+    Serial.println("PASS: controller answered the power-on command");
+  } else {
+    Serial.println("FAIL: BUSY never went LOW after power-on; the controller ignores commands.");
+    if (controllerResponds(wired, true)) {
+      Serial.println("FOUND: it answers in 3-wire SPI mode. Set the HAT's Interface Config\n"
+                     "       switch to 0.");
+    } else {
+      Serial.println("Trying every order of the DIN/CLK/CS/DC wires...");
+      int pins[4] = {PIN_EPD_DIN, PIN_EPD_CLK, PIN_EPD_CS, PIN_EPD_DC};
+      std::sort(pins, pins + 4);
+      bool found = false;
+      do {
+        SpiPins p = {pins[0], pins[1], pins[2], pins[3]};
+        if (controllerResponds(p, false)) {
+          Serial.printf("FOUND: it answers with DIN=GPIO%d CLK=GPIO%d CS=GPIO%d DC=GPIO%d.\n"
+                        "       Rewire to match pins.h, or change pins.h to this.\n",
+                        p.din, p.clk, p.cs, p.dc);
+          found = true;
+          break;
+        }
+      } while (std::next_permutation(pins, pins + 4));
+      if (!found) {
+        Serial.println("No wiring order worked. Likely causes: ribbon not fully seated or\n"
+                       "latched, no 3.3 V at HAT VCC while running, a broken signal wire, or\n"
+                       "a damaged panel controller (e.g. from powering it with the ribbon\n"
+                       "reversed).");
+      }
+    }
+  }
+
+  // Hand DIN/CLK back to the SPI peripheral for GxEPD2.
+  SPI.end();
+  SPI.begin(PIN_EPD_CLK, -1, PIN_EPD_DIN, -1);
+  pinMode(PIN_EPD_CS, OUTPUT);
+  digitalWrite(PIN_EPD_CS, HIGH);
+  pinMode(PIN_EPD_DC, OUTPUT);
+  digitalWrite(PIN_EPD_DC, HIGH);
+  return ok;
 }
 
 static void drawPattern() {
@@ -241,7 +347,7 @@ static void runDisplayTest() {
 // The refresh test only makes sense once the controller answers; without it
 // every refresh just waits out GxEPD2's 10 s busy timeout.
 static void runPanelChecks() {
-  if (checkBusyLine()) {
+  if (checkBusyLine() && checkCommandResponse()) {
     runDisplayTest();
   } else {
     digitalWrite(PIN_EPD_PWR, LOW);

@@ -79,7 +79,8 @@ Press **BOOT** to repeat the display test.
 | `nothing drives BUSY` (floating) | BUSY wire not on GPIO3, or the controller is unpowered: measure 3.3 V between HAT VCC and GND, check PWR → GPIO1, reseat the ribbon. |
 | `BUSY held LOW` | Controller stuck in reset/busy (check RST → GPIO2), a solder bridge to GND, or wrong switch settings. |
 | `IO 20 is not set as GPIO` log errors | Harmless GxEPD2 quirk, fixed in current firmware. |
-| Panel doesn't change at all, BUSY PASS | DIN/CLK/CS/DC swapped, or Interface Config set to 1. |
+| `controller ignores commands` / panel stays blank with ~2 µs `_Update_Full` | The controller never got the command. The test then tries 3-wire mode and every DIN/CLK/CS/DC order and prints the one that works. If none works: the ribbon isn't seated, VCC is missing, or the controller is damaged. |
+| BUSY PASS even with the HAT unpowered | The HAT pulls BUSY up itself, so that check alone can't prove the controller is alive; the command test does. |
 | Faint or washed-out image | Display Config set to A (should be B). |
 | Image garbled or shifted | Wrong panel driver. A 7.5" V1 (640×384) or HD (880×528) needs a different GxEPD2 class. |
 | Wi-Fi finds 0 networks | Antenna or radio problem. The SuperMini's ceramic antenna is weak inside some cases; test outside the case too. |
