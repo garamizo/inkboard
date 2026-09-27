@@ -50,16 +50,26 @@ _PowerOn : 133000
 _Update_Full : 2634001
 _PowerOff : 29001
 Full refresh (all black): 3382 ms
-Full refresh (test pattern): 3082 ms
+Full refresh 1: 3082 ms
 _Update_Part : 1162001
-Partial refresh 1: 1322 ms
-Partial refresh 2: 1188 ms
+First partial refresh: 1322 ms
+Soak test running: partial refresh every 1 s, full every 60 s.
 ...
-Display test done.
+Full refresh 2: 3100 ms  (last minute: 48 partial, avg 1190 ms, max 1322 ms)
 ```
 
 The `_PowerOn` / `_Update_*` lines come from GxEPD2 and are in µs: power-on ~130 ms, full
-update ~2.6 s, partial update ~1.2 s.
+update ~2.6 s, partial update ~1.2 s. (The `Full refresh 2` line and partial counts above are
+illustrative; the rest is a real run.)
+
+After the first two refreshes the test keeps running as a **soak test** until reset: the
+status box is redrawn with a partial refresh every second, and the whole screen with a full
+refresh every minute. A partial refresh takes ~1.2 s, so partials in practice run back to back,
+about 48-50 per minute. Each full refresh prints a one-line summary of the partial timings
+since the previous one. A sudden jump in `max`, or a `Busy Timeout!`, is the thing to watch.
+
+The panel stays powered while the soak test runs. That's fine for hours of testing, but don't
+leave it running for days: Waveshare advises against refreshing this panel continuously.
 
 **Warning signs:** a GxEPD2 timing of a few µs (`_Update_Full : 2`) means the controller
 never went busy, so it didn't get the command. `Busy Timeout!` with ~10000000 µs means BUSY
@@ -76,13 +86,14 @@ The panel goes **all black**, then shows the **test pattern**:
 | Line ladder 1-8 px (center) | Fine detail, SPI signal integrity | Jagged or missing thin lines, random noise |
 | Solid black block and ring (right) | Full-ink areas | Grey patches, speckles, a "crack" line |
 | Corner labels TR / BL / BR | Orientation and edges | Text cut off |
-| Counter box (bottom) | Partial refresh | It should count 1→5 without the whole screen flashing |
+| Status box (bottom) | Partial refresh | The `partial` count and uptime tick about once a second without the rest of the screen flashing; every minute the whole screen flashes once and `full` goes up |
 
 A cracked panel usually shows a permanent line or a region that never changes. A
 connector problem shows up as whole missing stripes, or as noise that changes between
 refreshes. Reseat the ribbon and try again before you conclude the panel is damaged.
 
-Press **BOOT** to repeat the display test.
+Hold **BOOT** for about a second (a short tap can land mid-refresh and be missed) to rerun
+the wiring checks and restart the soak test.
 
 ## Troubleshooting
 

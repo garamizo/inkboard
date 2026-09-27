@@ -5,7 +5,9 @@
 //   2. Radio: Wi-Fi scan (no credentials needed)
 //   3. e-Paper wiring: BUSY line behaviour after power-up and reset
 //   4. e-Paper panel: full black, then a test pattern (full refresh),
-//      then a counter updated with partial refreshes
+//      then a soak test that runs until reset: a status line updated with a
+//      partial refresh every second, and the whole pattern redrawn with a
+//      full refresh every minute
 // Press BOOT to run the wiring check and display test again.
 
 #include <Arduino.h>
@@ -27,6 +29,14 @@ GxEPD2_BW<GxEPD2_750_T7, GxEPD2_750_T7::HEIGHT> display(
 // Reset pulse for the Waveshare HAT. Its reset circuit needs a short pulse;
 // 10 ms (GxEPD2's default) can leave the controller holding BUSY LOW.
 constexpr int EPD_RESET_MS = 2;
+
+// Soak-test cadence. A partial refresh takes ~1.2 s, so in practice partials
+// run back to back; the full refresh clears the ghosting they accumulate.
+constexpr uint32_t PARTIAL_EVERY_MS = 1000;
+constexpr uint32_t FULL_EVERY_MS = 60 * 1000;
+
+// Status box at the bottom of the pattern, redrawn by every partial refresh.
+constexpr int STATUS_X = 24, STATUS_Y = 400, STATUS_W = 520, STATUS_H = 50;
 
 static int wifiNetworks = -1;
 static String bestSsid;
@@ -311,21 +321,75 @@ static void drawPattern() {
   display.setCursor(w - 36, 24);
   display.print("TR");
 
-  // Frame for the partial-refresh counter.
-  display.drawRect(24, 400, 360, 50, GxEPD_BLACK);
+  // Frame for the partial-refresh status line.
+  display.drawRect(STATUS_X, STATUS_Y, STATUS_W, STATUS_H, GxEPD_BLACK);
 }
 
-static void drawCounter(int n) {
-  const int x = 25, y = 401, w = 358, hh = 48;
-  display.setPartialWindow(x, y, w, hh);
+// --- Soak test ---------------------------------------------------------------
+
+static struct {
+  bool running = false;
+  uint32_t lastFull = 0, lastPartial = 0;
+  uint32_t fulls = 0, partials = 0;
+  // Partial-refresh timings since the last full refresh, for the serial summary.
+  uint32_t windowCount = 0, windowSumMs = 0, windowMaxMs = 0;
+} soak;
+
+// Status text inside the box (1 px inset so the frame is never overwritten).
+static void drawStatus() {
+  const int x = STATUS_X + 1, y = STATUS_Y + 1, w = STATUS_W - 2, h = STATUS_H - 2;
+  const uint32_t up = millis() / 1000;
+  display.fillRect(x, y, w, h, GxEPD_WHITE);
+  display.setFont(&FreeSans9pt7b);
+  display.setTextColor(GxEPD_BLACK);
+  display.setCursor(x + 12, y + 30);
+  display.printf("partial %lu   full %lu   uptime %lu:%02lu:%02lu", soak.partials, soak.fulls,
+                 up / 3600, up / 60 % 60, up % 60);
+}
+
+static void fullRefresh() {
+  uint32_t t = millis();
+  soak.lastFull = t;
+  soak.fulls++;
+  display.setFullWindow();
+  drawPattern();
+  drawStatus();
+  display.display(false);
+  uint32_t ms = millis() - t;
+  if (soak.windowCount > 0) {
+    Serial.printf("Full refresh %lu: %lu ms  (last minute: %lu partial, avg %lu ms, max %lu ms)\n",
+                  soak.fulls, ms, soak.windowCount, soak.windowSumMs / soak.windowCount,
+                  soak.windowMaxMs);
+  } else {
+    Serial.printf("Full refresh %lu: %lu ms\n", soak.fulls, ms);
+  }
+  soak.windowCount = soak.windowSumMs = soak.windowMaxMs = 0;
+}
+
+static void partialRefresh() {
+  uint32_t t = millis();
+  soak.lastPartial = t;
+  soak.partials++;
+  display.setPartialWindow(STATUS_X + 1, STATUS_Y + 1, STATUS_W - 2, STATUS_H - 2);
   display.firstPage();
   do {
-    display.fillRect(x, y, w, hh, GxEPD_WHITE);
-    display.setFont(&FreeSans9pt7b);
-    display.setTextColor(GxEPD_BLACK);
-    display.setCursor(x + 12, y + 30);
-    display.printf("partial refresh %d / 5   uptime %lus", n, millis() / 1000);
+    drawStatus();
   } while (display.nextPage());
+  uint32_t ms = millis() - t;
+  soak.windowCount++;
+  soak.windowSumMs += ms;
+  soak.windowMaxMs = std::max(soak.windowMaxMs, ms);
+}
+
+// Called from loop(): whichever refresh is due. The full refresh wins a tie.
+static void runSoakStep() {
+  if (!soak.running) return;
+  uint32_t now = millis();
+  if (now - soak.lastFull >= FULL_EVERY_MS) {
+    fullRefresh();
+  } else if (now - soak.lastPartial >= PARTIAL_EVERY_MS) {
+    partialRefresh();
+  }
 }
 
 static void runDisplayTest() {
@@ -344,29 +408,24 @@ static void runDisplayTest() {
   display.display(false);
   Serial.printf("Full refresh (all black): %lu ms\n", millis() - t);
 
+  // The first full refresh of the soak test draws the test pattern.
+  soak = {};
+  fullRefresh();
+
   t = millis();
-  display.setFullWindow();
-  drawPattern();
-  display.display(false);
-  Serial.printf("Full refresh (test pattern): %lu ms\n", millis() - t);
+  partialRefresh();
+  Serial.printf("First partial refresh: %lu ms\n", millis() - t);
 
-  for (int n = 1; n <= 5; n++) {
-    t = millis();
-    drawCounter(n);
-    Serial.printf("Partial refresh %d: %lu ms\n", n, millis() - t);
-    delay(1000);
-  }
-
-  // Deep sleep for the panel controller, then cut the HAT's supply.
-  display.hibernate();
-  digitalWrite(PIN_EPD_PWR, LOW);
-  Serial.println("Display test done. Compare the panel against docs/smoke-test.md.");
-  Serial.println("Press BOOT to run it again.");
+  soak.running = true;
+  Serial.printf("Soak test running: partial refresh every %lu s, full every %lu s.\n"
+                "Compare the panel against docs/smoke-test.md. Press BOOT to rerun the checks.\n",
+                PARTIAL_EVERY_MS / 1000, FULL_EVERY_MS / 1000);
 }
 
 // Without a powered controller every refresh just waits out GxEPD2's 10 s
 // busy timeout, so only an undriven BUSY line skips the display test.
 static void runPanelChecks() {
+  soak.running = false;
   if (!checkBusyLine()) {
     digitalWrite(PIN_EPD_PWR, LOW);
     Serial.println("Skipping the display test. Fix the wiring, then press BOOT to retest.");
@@ -417,4 +476,5 @@ void loop() {
     while (digitalRead(PIN_BOOT_BTN) == LOW) delay(10);
     runPanelChecks();
   }
+  runSoakStep();
 }
