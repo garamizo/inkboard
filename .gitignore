@@ -1,0 +1,5 @@
+.pio/
+.vscode/*
+!.vscode/extensions.json
+include/secrets.h
+*.pyc
