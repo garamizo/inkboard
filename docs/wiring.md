@@ -41,6 +41,12 @@ If you change one, change the other.
 Header order follows the common SuperMini layout. Check it against the silkscreen on your
 board, because clones differ.
 
+> **Not the kit's pin map.** The kit's reference firmware
+> ([VoIPshare/ESP32-eInk-Dashboard](https://github.com/VoIPshare/ESP32-eInk-Dashboard)) uses
+> CS=4, DC=20, RST=21, BUSY=22, SCK=7, MOSI=5, PWR=1. inkboard uses the map above, which keeps
+> the ADC pins free and uses only side-header pins. If you follow the kit's instructions, wire to
+> this table instead, or build `pio run -e minimal-kit-pins` for a quick display check.
+
 ## HAT switches (check these before powering up)
 
 The e-Paper Driver HAT has two slide switches:
@@ -50,8 +56,12 @@ The e-Paper Driver HAT has two slide switches:
 | **Display Config** | **B** | Selects the current-sense resistor for the panel's boost converter (A = 3 Ω, B = 0.47 Ω). Waveshare specifies B for the 7.5" V2. The wrong setting gives a faint or failed refresh. |
 | **Interface Config** | **0** | 4-wire SPI (with a separate DC line). 1 = 3-wire SPI, which this firmware does not use. |
 
-Seat the ribbon cable fully in the FPC connector, contacts facing the board, and close the
-latch. A crooked ribbon is the most common cause of missing stripes or a dead panel.
+Seat the ribbon cable fully and straight in the FPC connector, then close the latch.
+**Orientation matters and is easy to get wrong.** Match the photos on Waveshare's
+[7.5inch e-Paper HAT wiki](https://www.waveshare.com/wiki/7.5inch_e-Paper_HAT_Manual). On our
+first bring-up the ribbon was upside down. The symptom was a blank panel, BUSY stuck LOW, and
+`Busy Timeout!` on every refresh. Nothing was damaged: flipping it fixed everything.
+A crooked ribbon shows up as missing stripes instead.
 
 ## Why these pins
 
@@ -79,9 +89,18 @@ above avoid the pins that have side effects:
 
 ## Battery (planned)
 
-The SuperMini has **B+ / B-** pads on its underside, fed by an on-board Li-ion charger that
-charges from USB-C. Solder a single-cell LiPo there (B- is GND). Double-check the polarity:
-reversing it will destroy the board.
+The SuperMini has **B+ / B-** pads on its underside, fed by an on-board single-cell Li-ion
+charger (reported as a TP4054) that charges from USB-C. Solder a single-cell 3.7 V LiPo there
+(B- is GND). Double-check the polarity: reversing it will destroy the board.
+
+- **Use a pack with a protection circuit (PCM).** The board has no documented under-voltage
+  cutoff, and a deeply discharged LiPo is ruined.
+- **USB plus battery:** this is how charging works, but the board's power path (how USB and B+
+  feed the 3.3 V regulator) is not documented for these clones. One source warns against
+  connecting both without a diode. Before relying on it, confirm on your board (see
+  [hardware.md](hardware.md#battery-power-path-verify-before-relying-on-it)).
+- **The 5V pin is only live on USB.** On battery, anything wired to 5V (such as a speaker amp)
+  gets no power; use B+ instead.
 
 The board has **no on-board divider** for reading the battery voltage. To measure it, add:
 

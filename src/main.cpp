@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <SPI.h>
 #include <WiFi.h>
+#include <esp_mac.h>
 #include <GxEPD2_BW.h>
 #include <Fonts/FreeSansBold18pt7b.h>
 #include <Fonts/FreeSans9pt7b.h>
@@ -31,6 +32,16 @@ static int wifiNetworks = -1;
 static String bestSsid;
 static int bestRssi = 0;
 
+// Read from eFuse: WiFi.macAddress() returns zeros while Wi-Fi is off.
+static String macAddress() {
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  char buf[18];
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3],
+           mac[4], mac[5]);
+  return buf;
+}
+
 static void banner(const char* title) {
   Serial.printf("\n=== %s ===\n", title);
 }
@@ -41,7 +52,7 @@ static void checkMcu() {
                 ESP.getChipRevision(), ESP.getChipCores(), ESP.getCpuFreqMHz());
   Serial.printf("Flash: %lu KB, free heap: %lu B\n", ESP.getFlashChipSize() / 1024,
                 ESP.getFreeHeap());
-  Serial.printf("MAC: %s\n", WiFi.macAddress().c_str());
+  Serial.printf("MAC: %s\n", macAddress().c_str());
 
   Serial.println("LED: status LED blinks, RGB LED cycles red -> green -> blue");
   pinMode(PIN_LED_STATUS, OUTPUT);
@@ -265,7 +276,7 @@ static void drawPattern() {
   display.setFont(&FreeSans9pt7b);
   display.setCursor(24, 90);
   display.printf("%s rev %d  |  MAC %s", ESP.getChipModel(), ESP.getChipRevision(),
-                 WiFi.macAddress().c_str());
+                 macAddress().c_str());
   display.setCursor(24, 115);
   if (wifiNetworks > 0) {
     display.printf("Wi-Fi: %d networks, strongest \"%s\" %d dBm", wifiNetworks,
