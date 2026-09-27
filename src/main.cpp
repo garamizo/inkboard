@@ -97,7 +97,9 @@ static const char* lineStateName(LineState s) {
   }
 }
 
-// The UC8179 drives BUSY HIGH when idle and LOW while working.
+// The UC8179 drives BUSY HIGH when idle and LOW while working. Some panels
+// also hold it LOW after reset until they receive commands, so a LOW reading
+// here is reported but not fatal; checkCommandResponse() decides.
 static bool checkBusyLine() {
   banner("e-Paper wiring");
   pinMode(PIN_EPD_RST, OUTPUT);
@@ -112,16 +114,18 @@ static bool checkBusyLine() {
   digitalWrite(PIN_EPD_RST, LOW);
   delay(10);
   digitalWrite(PIN_EPD_RST, HIGH);
-  delay(200);
+  pinMode(PIN_EPD_BUSY, INPUT);
+  uint32_t t = millis();
+  while (digitalRead(PIN_EPD_BUSY) == LOW && millis() - t < 2000) delay(1);
+  uint32_t lowMs = millis() - t;
   LineState on = probeBusy();
 
   Serial.printf("BUSY with HAT power off: %s\n", lineStateName(off));
-  Serial.printf("BUSY with HAT power on, after reset: %s\n", lineStateName(on));
+  Serial.printf("BUSY after reset: LOW for %lu ms, then %s\n", lowMs, lineStateName(on));
 
   switch (on) {
     case LineState::DrivenHigh:
-      // Not proof of life on its own: a pull-up on the HAT reads the same.
-      Serial.println("PASS: BUSY reads HIGH (idle)");
+      Serial.println("PASS: controller idle after reset");
       return true;
     case LineState::Floating:
       Serial.println("FAIL: nothing drives BUSY. Either the BUSY wire does not reach GPIO3,\n"
@@ -129,17 +133,17 @@ static bool checkBusyLine() {
                      "      GND, the PWR wire (GPIO1), and that the ribbon is fully latched.");
       return false;
     default:
-      Serial.println("FAIL: BUSY held LOW. The controller is stuck busy or in reset, or BUSY\n"
-                     "      is shorted to GND: check the RST wire (GPIO2), look for solder\n"
-                     "      bridges, and confirm Interface Config = 0, Display Config = B.");
-      return false;
+      Serial.println("WARN: BUSY still LOW 2 s after reset. Normal for some panels until the\n"
+                     "      first command; the command test below decides.");
+      return true;
   }
 }
 
 // --- Command-response test -------------------------------------------------
-// Bit-bangs one UC8179 command and watches BUSY. PON (0x04, power on) keeps
-// BUSY LOW for tens of ms while the charge pumps start; POF (0x02) turns them
-// off again. If BUSY never drops, the controller did not get the command.
+// Bit-bangs one UC8179 command and watches BUSY for a change it causes.
+// PON (0x04, power on) keeps BUSY LOW while the charge pumps start, then
+// releases it; POF (0x02) turns them off again. From an idle (HIGH) BUSY we
+// expect it to drop; from a LOW BUSY we expect PON to finish and release it.
 
 constexpr uint8_t CMD_POWER_ON = 0x04;
 constexpr uint8_t CMD_POWER_OFF = 0x02;
@@ -179,12 +183,12 @@ static bool controllerResponds(const SpiPins& p, bool threeWire) {
   delay(10);
   digitalWrite(PIN_EPD_RST, HIGH);
   delay(20);
-  if (!waitBusy(HIGH, 200)) return false;
+  bool idleBefore = waitBusy(HIGH, 200);
 
   bitBangCommand(p, CMD_POWER_ON, threeWire);
-  bool responded = waitBusy(LOW, 200);
+  bool responded = idleBefore ? waitBusy(LOW, 200) && waitBusy(HIGH, 2000)
+                              : waitBusy(HIGH, 2000);
   if (responded) {
-    waitBusy(HIGH, 1000);
     bitBangCommand(p, CMD_POWER_OFF, threeWire);
     waitBusy(HIGH, 1000);
   }
@@ -202,7 +206,7 @@ static bool checkCommandResponse() {
   if (ok) {
     Serial.println("PASS: controller answered the power-on command");
   } else {
-    Serial.println("FAIL: BUSY never went LOW after power-on; the controller ignores commands.");
+    Serial.println("FAIL: BUSY did not react to power-on; the controller ignores commands.");
     if (controllerResponds(wired, true)) {
       Serial.println("FOUND: it answers in 3-wire SPI mode. Set the HAT's Interface Config\n"
                      "       switch to 0.");
