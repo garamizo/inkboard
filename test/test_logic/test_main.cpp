@@ -6,6 +6,7 @@
 #include "http_time.h"
 #include "badge.h"
 #include "body_reader.h"
+#include "cycle.h"
 
 using namespace wake;
 
@@ -345,6 +346,126 @@ void test_reader_declared_length_ignores_open_connection() {
   TEST_ASSERT_EQUAL_INT32(48000, read_body(s, 48000));
 }
 
+struct FakeOps {
+  bool fs = true;
+  bool stored = false;
+  uint8_t disk[48000];
+  char disk_etag[40] = "";
+  wake::Fetched next;
+  uint8_t body_fill = 0xFF;
+  char log[128] = "";
+  char etag_at_show[40] = "";
+  uint8_t shown[48000];
+
+  void ev(const char* e) { strcat(log, e); strcat(log, " "); }
+  bool store_ok() { return fs; }
+  void load_etag(char* out, size_t n) { strncpy(out, disk_etag, n - 1); out[n - 1] = '\0'; }
+  bool has_frame() { return stored; }
+  bool load_frame(uint8_t* b) {
+    ev("load");
+    if (!stored) return false;
+    memcpy(b, disk, sizeof disk);
+    return true;
+  }
+  bool save(const uint8_t* b, const char* e) {
+    ev("save");
+    memcpy(disk, b, sizeof disk);
+    strcpy(disk_etag, e);
+    stored = true;
+    return true;
+  }
+  void clear_etag() { ev("clear"); disk_etag[0] = '\0'; }
+  wake::Fetched fetch(const char*, uint8_t* buf) {
+    ev("fetch");
+    if (next.outcome == wake::Outcome::Frame200) memset(buf, body_fill, 48000);
+    return next;
+  }
+  void show(const uint8_t* b) { ev("show"); strcpy(etag_at_show, disk_etag); memcpy(shown, b, sizeof shown); }
+  void show_error(const char*) { ev("error"); }
+};
+
+static FakeOps g_ops;          // large buffers: keep them off the stack
+static wake::Rtc g_rtc;
+static uint8_t g_cycle_frame[48000];
+
+static wake::Fetched F(wake::Outcome o, const char* etag = "") {
+  wake::Fetched f;
+  f.outcome = o;
+  f.next_refresh_s = 3660;
+  f.date_epoch = 1790537945LL;   // Sun, 27 Sep 2026 19:39:05 GMT
+  f.utc_offset_s = -25200;
+  strcpy(f.etag, etag);
+  return f;
+}
+
+static int32_t cycle(wake::Fetched f) {
+  g_ops.next = f;
+  g_ops.log[0] = '\0';
+  return wake::run_cycle(g_ops, g_rtc, g_cycle_frame, 3600);
+}
+
+static void fresh_board() {
+  g_ops = FakeOps();
+  g_rtc = wake::Rtc{};  // magic 0: cold boot
+}
+
+void test_cycle_saves_etag_only_after_showing() {
+  fresh_board();
+  g_ops.stored = true;
+  strcpy(g_ops.disk_etag, "\"old\"");
+  TEST_ASSERT_EQUAL_INT32(3660, cycle(F(wake::Outcome::Frame200, "\"new\"")));
+  TEST_ASSERT_EQUAL_STRING("fetch show save ", g_ops.log);
+  TEST_ASSERT_EQUAL_STRING("\"old\"", g_ops.etag_at_show);   // a power cut during show keeps the old tag
+  TEST_ASSERT_EQUAL_STRING("\"new\"", g_ops.disk_etag);
+}
+
+void test_cycle_cold_boot_304_restores_stored_frame() {
+  fresh_board();
+  g_ops.stored = true;
+  memset(g_ops.disk, 0xAA, sizeof g_ops.disk);
+  strcpy(g_ops.disk_etag, "\"e\"");
+  cycle(F(wake::Outcome::NotModified304));
+  TEST_ASSERT_EQUAL_STRING("fetch load show ", g_ops.log);
+  TEST_ASSERT_EQUAL_HEX8(0xAA, g_ops.shown[123]);
+  cycle(F(wake::Outcome::NotModified304));                     // now known: leave it alone
+  TEST_ASSERT_EQUAL_STRING("fetch ", g_ops.log);
+}
+
+void test_cycle_badge_on_third_failure_over_stored_frame() {
+  fresh_board();
+  cycle(F(wake::Outcome::Frame200, "\"a\""));                  // white frame shown and stored
+  TEST_ASSERT_EQUAL_INT32(300, cycle(F(wake::Outcome::Failure)));
+  TEST_ASSERT_EQUAL_STRING("fetch ", g_ops.log);
+  TEST_ASSERT_EQUAL_INT32(900, cycle(F(wake::Outcome::Failure)));
+  TEST_ASSERT_EQUAL_INT32(3600, cycle(F(wake::Outcome::Failure)));
+  TEST_ASSERT_EQUAL_STRING("fetch load show ", g_ops.log);
+  TEST_ASSERT_TRUE(badge::is_black(g_ops.shown, 795, 477));  // badge border, bottom-right
+  TEST_ASSERT_FALSE(badge::is_black(g_ops.shown, 10, 10));   // rest of the stored frame
+  TEST_ASSERT_EQUAL_HEX8(0xFF, g_ops.disk[47999]);            // flash copy stays clean
+  cycle(F(wake::Outcome::NotModified304));                     // back online: clean frame again
+  TEST_ASSERT_EQUAL_STRING("fetch load show ", g_ops.log);
+  TEST_ASSERT_FALSE(badge::is_black(g_ops.shown, 795, 477));
+}
+
+void test_cycle_power_loss_with_badge_then_304_clears_it() {
+  fresh_board();
+  cycle(F(wake::Outcome::Frame200, "\"a\""));
+  for (int i = 0; i < 3; i++) cycle(F(wake::Outcome::Failure));   // badge on the panel
+  g_rtc = wake::Rtc{};                                              // power loss
+  cycle(F(wake::Outcome::NotModified304));
+  TEST_ASSERT_EQUAL_STRING("fetch load show ", g_ops.log);
+  TEST_ASSERT_FALSE(badge::is_black(g_ops.shown, 795, 477));
+}
+
+void test_cycle_config_error_drawn_once() {
+  fresh_board();
+  cycle(F(wake::Outcome::Frame200, "\"a\""));
+  TEST_ASSERT_EQUAL_INT32(3600, cycle(F(wake::Outcome::BadRequest400)));
+  TEST_ASSERT_EQUAL_STRING("fetch clear error ", g_ops.log);
+  cycle(F(wake::Outcome::BadRequest400));
+  TEST_ASSERT_EQUAL_STRING("fetch clear ", g_ops.log);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_classify_200_needs_exact_length);
@@ -379,5 +500,10 @@ int main(int, char**) {
   RUN_TEST(test_reader_rejects_truncated_body);
   RUN_TEST(test_reader_times_out_when_body_never_ends);
   RUN_TEST(test_reader_declared_length_ignores_open_connection);
+  RUN_TEST(test_cycle_saves_etag_only_after_showing);
+  RUN_TEST(test_cycle_cold_boot_304_restores_stored_frame);
+  RUN_TEST(test_cycle_badge_on_third_failure_over_stored_frame);
+  RUN_TEST(test_cycle_power_loss_with_badge_then_304_clears_it);
+  RUN_TEST(test_cycle_config_error_drawn_once);
   return UNITY_END();
 }
