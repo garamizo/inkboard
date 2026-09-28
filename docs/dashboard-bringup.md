@@ -6,10 +6,10 @@ results in the table at the end.
 **Before you start:**
 - `include/secrets.h` has your Wi-Fi credentials (copy it from `include/secrets.h.example`).
 - A server is reachable. Pick one:
-  - **Production:** `just check` shows the public URL working. Flash with `just flash`
-    (or `just flash prod`).
+  - **Production:** `just check` shows the public URL working. Flash with `just flash`.
+
   - **Dev server on the LAN:** run `just dev` on this machine and flash with
-    `just flash dev`, which points the firmware at `http://<this machine's LAN IP>:8765`.
+    `just flash-dev`, which points the firmware at `http://<this machine's LAN IP>:8765`.
     You don't need to deploy anything or set up the tunnel for this.
 - The serial monitor shows `GET -> <status>` and `sleeping <s> s` on each wake.
 - Deep sleep drops USB serial. To see the next wake, reopen `just monitor` after the sleep,
@@ -17,7 +17,7 @@ results in the table at the end.
   300 s (`wake::MIN_SLEEP_S`).
 
 ## 1. Orientation and bit order
-Set `USE_CALIBRATION_PATTERN 1` in `include/config.h`, then flash (`just flash` or `just flash dev`).
+Set `USE_CALIBRATION_PATTERN 1` in `include/config.h`, then flash (`just flash` or `just flash-dev`).
 - A solid square is **top-left**, a dot is **bottom-right**, and the brackets are at the
   other two corners.
 - The text reads normally (not mirrored), and it is black on white.

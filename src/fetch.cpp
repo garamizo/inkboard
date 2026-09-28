@@ -10,7 +10,16 @@
 #include "ca_certs.h"
 #include "config.h"
 #include "http_time.h"
+#if !__has_include("secrets.h")
+#error "Copy include/secrets.h.example to include/secrets.h and put your Wi-Fi credentials in it."
+#endif
 #include "secrets.h"
+
+// Refuse to build firmware that could never join Wi-Fi (works for every build path: just, pio, IDE).
+static constexpr bool same_text(const char* a, const char* b) {
+  return *a == *b && (*a == '\0' || same_text(a + 1, b + 1));
+}
+static_assert(!same_text(WIFI_SSID, "your-network"), "Put your Wi-Fi credentials in include/secrets.h");
 
 bool wifi_connect(uint32_t timeout_ms) {
   WiFi.mode(WIFI_STA);

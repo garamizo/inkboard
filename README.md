@@ -15,7 +15,7 @@ case.
 ```bash
 uv tool install platformio
 pio run -e smoke -t upload -t monitor   # flashes the hardware smoke test (just flash smoke)
-just flash            # dashboard firmware (prod API); `just flash dev` targets this machine's `just dev`
+just flash            # dashboard firmware (prod API); `just flash-dev` targets this machine's `just dev`
 ```
 
 Wire it first: [docs/wiring.md](docs/wiring.md). Then check the results against
