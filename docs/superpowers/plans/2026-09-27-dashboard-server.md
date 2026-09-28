@@ -546,17 +546,46 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `server/tests/conftest.py` (add `FakeClock` and the `clock` fixture)
 - Test: `server/tests/test_cached_source.py`
 
+**Design (revised after the plan's Codex review):**
+- **Stale-while-revalidate.** A fresh entry is returned as is. For an *expired* entry, the
+  source starts one background refresh and returns the old data **immediately**, so a slow
+  or dead upstream never delays a response.
+- **Cold keys.** A key with no data at all has nothing to fall back on, so it waits for its
+  refresh, but no longer than `min(cold_wait_s, deadline - now)`. `deadline` is a
+  `time.monotonic()` value supplied per request (Task 11). On timeout it raises `NoData`;
+  the fetch keeps running, and the next request benefits.
+- **Staleness.** A result is stale when the entry's most recent refresh failed, or when the
+  entry is older than `stale_after` (default 2 × TTL, which covers refreshes that never
+  report back).
+- **Single-flight** comes from an `_inflight: dict[key, Future]` table that holds only
+  running refreshes. It is independent of cache eviction, so evicting a key while its
+  refresh runs can't start a second fetch. There are no per-key locks to leak.
+- **Failure memory.** `_miss_failures` (keys that never succeeded) is an LRU capped at
+  `max_entries`.
+- **Disk bound across restarts.**
+  - At start-up the source scans its directory, deletes files beyond `max_entries`
+    (oldest by mtime first) along with any stray temp files, and seeds a disk LRU index.
+  - Every store updates that index and deletes the oldest file when over the cap.
+  - Writes go to a uniquely named temp file, then `replace`.
+- **The daily upstream budget persists** in `<cache_dir>/<name>/_budget.json` as
+  `{"day", "calls"}`, written atomically on every call. A restart continues the same
+  day's count.
+- **Executors.** Refreshes run on an `Executor`. Production uses a shared 8-thread pool.
+  Tests use `InlineExecutor`, which runs the refresh in the caller's thread so results are
+  deterministic: an expired entry then comes back already refreshed, or already marked
+  stale.
+
 **Interfaces:**
 - Produces (in `sources/base.py`):
   - `utcnow() -> datetime`
   - `SourceResult(key: str, data: Any, fetched_at: datetime, stale: bool)`, with the
     property `.version -> tuple[str, str, bool]`
   - `NoData(Exception)`, with the attribute `.source: str`
-  - `UpstreamCapReached(Exception)`
-  - `CachedSource(name, fetch: Callable[[dict], Any], *, ttl: timedelta, cache_dir: Path | None = None, max_entries: int = 1000, daily_cap: int | None = None, retry_after: timedelta = timedelta(minutes=5), clock=utcnow)`
+  - `InlineExecutor(Executor)`
+  - `CachedSource(name, fetch: Callable[[dict], Any], *, ttl: timedelta, cache_dir: Path | None = None, max_entries: int = 1000, daily_cap: int | None = None, retry_after: timedelta = timedelta(minutes=5), stale_after: timedelta | None = None, cold_wait_s: float = 8.0, executor: Executor | None = None, clock=utcnow)`
     with:
     - `.key_for(params: dict) -> str`
-    - `.get(params: dict) -> SourceResult` (raises `NoData`)
+    - `.get(params: dict, deadline: float | None = None) -> SourceResult` (raises `NoData`)
     - `.health() -> dict`
     - `.upstream_calls: int`
     - `.name: str`
@@ -591,29 +620,41 @@ def clock():
 `server/tests/test_cached_source.py`:
 ```python
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 import pytest
 
-from inkboard_server.sources.base import CachedSource, NoData
+from inkboard_server.sources.base import CachedSource, InlineExecutor, NoData
 
 
 class Upstream:
     def __init__(self):
         self.calls = 0
         self.fail = False
-        self.value = 1
+        self.delay = 0.0
+        self.block: dict[int, threading.Event] = {}
 
     def __call__(self, params):
         self.calls += 1
+        if params.get("a") in self.block:
+            self.block[params["a"]].wait(5)
+        if self.delay:
+            time.sleep(self.delay)
         if self.fail:
             raise RuntimeError("upstream down")
-        return {"v": self.value, "p": params}
+        return {"p": params}
 
 
 def make(clock, tmp_path, up, **kw):
     kw.setdefault("ttl", timedelta(minutes=30))
+    kw.setdefault("executor", InlineExecutor())
     return CachedSource("t", up, cache_dir=tmp_path, clock=clock, **kw)
+
+
+def files(tmp_path):
+    return sorted(p.name for p in (tmp_path / "t").glob("[0-9a-f]*.json"))
 
 
 def test_key_is_order_independent(clock, tmp_path):
@@ -671,9 +712,8 @@ def test_failure_retry_spacing(clock, tmp_path):
 def test_never_succeeded_raises_nodata(clock, tmp_path):
     up = Upstream()
     up.fail = True
-    src = make(clock, tmp_path, up)
     with pytest.raises(NoData) as exc:
-        src.get({"a": 1})
+        make(clock, tmp_path, up).get({"a": 1})
     assert exc.value.source == "t"
 
 
@@ -691,25 +731,82 @@ def test_missing_key_retry_spacing(clock, tmp_path):
     assert up.calls == 2
 
 
-def test_disk_round_trip(clock, tmp_path):
+def test_failed_keys_are_bounded(clock, tmp_path):
     up = Upstream()
-    first = make(clock, tmp_path, up).get({"a": 1})
-    again = make(clock, tmp_path, up).get({"a": 1})  # new instance, same dir
-    assert up.calls == 1
-    assert again.fetched_at == first.fetched_at and again.data == first.data
-
-
-def test_lru_cap_evicts_memory_and_disk(clock, tmp_path):
-    up = Upstream()
+    up.fail = True
     src = make(clock, tmp_path, up, max_entries=2)
-    for k in (1, 2, 3):
-        src.get({"a": k})
-    assert len(list((tmp_path / "t").glob("*.json"))) == 2
-    src.get({"a": 1})  # evicted, so refetched
-    assert up.calls == 4
+    for k in range(100):
+        with pytest.raises(NoData):
+            src.get({"a": k})
+    assert len(src._miss_failures) == 2
+    assert src._inflight == {}
 
 
-def test_single_flight(clock, tmp_path):
+def test_stale_after_even_without_a_reported_failure(clock, tmp_path):
+    up = Upstream()
+    src = make(clock, tmp_path, up, retry_after=timedelta(hours=10))
+    src.get({"a": 1})
+    clock.advance(minutes=31)
+    up.fail = True
+    assert src.get({"a": 1}).stale  # failed refresh
+    src2 = make(clock, tmp_path / "other", Upstream())
+    src2.get({"a": 1})
+    src2._start_refresh = lambda key, params: None  # refreshes never start
+    clock.advance(minutes=45)
+    assert not src2.get({"a": 1}).stale  # 45 min < 2 x TTL
+    clock.advance(minutes=20)
+    assert src2.get({"a": 1}).stale      # 65 min >= 2 x TTL
+
+
+def test_expired_entry_returns_immediately_while_refreshing(clock, tmp_path):
+    up = Upstream()
+    pool = ThreadPoolExecutor(2)
+    src = make(clock, tmp_path, up, executor=pool)
+    first = src.get({"a": 1})
+    clock.advance(minutes=31)
+    up.block[1] = threading.Event()
+    t0 = time.monotonic()
+    r = src.get({"a": 1})
+    assert time.monotonic() - t0 < 0.2
+    assert r.fetched_at == first.fetched_at and not r.stale  # refresh in flight, not failed
+    up.block[1].set()
+    pool.shutdown(wait=True)
+    assert src.get({"a": 1}).fetched_at > first.fetched_at
+
+
+def test_cold_wait_bounded_by_deadline(clock, tmp_path):
+    up = Upstream()
+    up.delay = 1.0
+    pool = ThreadPoolExecutor(2)
+    src = make(clock, tmp_path, up, executor=pool)
+    t0 = time.monotonic()
+    with pytest.raises(NoData):
+        src.get({"a": 1}, deadline=time.monotonic() + 0.1)
+    assert time.monotonic() - t0 < 0.5
+    pool.shutdown(wait=True)  # the fetch finished in the background
+    assert src.get({"a": 1}).data == {"p": {"a": 1}}
+    assert up.calls == 1
+
+
+def test_eviction_during_refresh_keeps_single_flight(clock, tmp_path):
+    up = Upstream()
+    pool = ThreadPoolExecutor(4)
+    src = make(clock, tmp_path, up, executor=pool, max_entries=2)
+    src.get({"a": 1}, deadline=time.monotonic() + 2)
+    clock.advance(minutes=31)
+    up.block[1] = threading.Event()
+    src.get({"a": 1})                                   # refresh of a=1 starts and blocks
+    src.get({"a": 2}, deadline=time.monotonic() + 2)    # these two evict a=1
+    src.get({"a": 3}, deadline=time.monotonic() + 2)
+    with pytest.raises(NoData):
+        src.get({"a": 1}, deadline=time.monotonic() + 0.1)  # evicted; its refresh is still in flight
+    assert up.calls == 4                                # no second fetch for a=1
+    up.block[1].set()
+    pool.shutdown(wait=True)
+    assert src.get({"a": 1}).data == {"p": {"a": 1}}
+
+
+def test_single_flight_cold(clock, tmp_path):
     release = threading.Event()
     calls = []
 
@@ -718,11 +815,14 @@ def test_single_flight(clock, tmp_path):
         release.wait(5)
         return 42
 
-    src = CachedSource("t", slow, ttl=timedelta(minutes=30), cache_dir=tmp_path, clock=clock)
+    src = CachedSource("t", slow, ttl=timedelta(minutes=30), cache_dir=tmp_path, clock=clock,
+                       executor=ThreadPoolExecutor(4))
     results = []
-    threads = [threading.Thread(target=lambda: results.append(src.get({"a": 1}))) for _ in range(4)]
+    threads = [threading.Thread(target=lambda: results.append(src.get({"a": 1}, deadline=time.monotonic() + 5)))
+               for _ in range(4)]
     for t in threads:
         t.start()
+    time.sleep(0.1)
     release.set()
     for t in threads:
         t.join(5)
@@ -730,24 +830,59 @@ def test_single_flight(clock, tmp_path):
     assert [r.data for r in results] == [42] * 4
 
 
-def test_daily_cap(clock, tmp_path):
+def test_disk_round_trip(clock, tmp_path):
+    up = Upstream()
+    first = make(clock, tmp_path, up).get({"a": 1})
+    again = make(clock, tmp_path, up).get({"a": 1})  # new instance, same dir
+    assert up.calls == 1
+    assert again.fetched_at == first.fetched_at and again.data == first.data
+
+
+def test_disk_cap_holds_across_restarts(clock, tmp_path):
+    up = Upstream()
+    for run in range(3):
+        src = make(clock, tmp_path, up, max_entries=2)
+        src.get({"a": run * 10})
+        src.get({"a": run * 10 + 1})
+        clock.advance(seconds=1)
+    assert len(files(tmp_path)) == 2
+
+
+def test_startup_prunes_oldest_files(clock, tmp_path):
+    up = Upstream()
+    src = make(clock, tmp_path, up, max_entries=10)
+    for k in range(5):
+        src.get({"a": k})
+        time.sleep(0.01)  # distinct mtimes
+    (tmp_path / "t" / ".stray.tmp").write_text("x")
+    make(clock, tmp_path, up, max_entries=2)
+    assert len(files(tmp_path)) == 2
+    assert not (tmp_path / "t" / ".stray.tmp").exists()
+    newest = make(clock, tmp_path, up, max_entries=2)
+    newest.get({"a": 4})
+    assert up.calls == 5  # a=4 was kept on disk, so no refetch
+
+
+def test_daily_cap_persists_across_restarts(clock, tmp_path):
     up = Upstream()
     src = make(clock, tmp_path, up, daily_cap=2)
     src.get({"a": 1})
     src.get({"a": 2})
+    restarted = make(clock, tmp_path, up, daily_cap=2)
     with pytest.raises(NoData):
-        src.get({"a": 3})
+        restarted.get({"a": 3})
     assert up.calls == 2
     clock.advance(days=1)
-    assert not src.get({"a": 4}).stale
+    assert not restarted.get({"a": 4}).stale
+    assert up.calls == 3
 
 
 def test_health(clock, tmp_path):
-    src = make(clock, tmp_path, Upstream())
+    src = make(clock, tmp_path, Upstream(), daily_cap=10)
     src.get({"a": 1})
     h = src.health()
-    assert h["entries"] == 1 and h["upstream_calls"] == 1
-    assert h["newest_fetch"] == clock().isoformat()
+    assert h == {"entries": 1, "newest_fetch": clock().isoformat(), "upstream_calls": 1,
+                 "calls_today": 1, "refreshing": 0}
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -760,10 +895,13 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'inkboard_server.sourc
 Create an empty `server/inkboard_server/sources/__init__.py`, then
 `server/inkboard_server/sources/base.py`:
 ```python
-"""A cache in front of an upstream fetch.
+"""A cache in front of an upstream fetch (spec §3.4).
 
-TTL, last-good fallback (stale), disk persistence, single-flight per key, an LRU cap,
-retry spacing after failures, and an optional daily cap on upstream calls.
+Stale-while-revalidate: expired entries are served at once while one background refresh
+runs; only keys with no data wait, bounded by the caller's deadline. Also: last-good
+fallback marked stale, single-flight per key, LRU caps in memory and on disk (enforced
+across restarts), retry spacing after failures, and a daily upstream budget that survives
+restarts.
 """
 from __future__ import annotations
 
@@ -771,13 +909,17 @@ import hashlib
 import json
 import logging
 import threading
+import time
+import uuid
 from collections import OrderedDict
+from concurrent.futures import Executor, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
+_BACKGROUND = ThreadPoolExecutor(max_workers=8, thread_name_prefix="inkboard-fetch")
 
 
 def utcnow() -> datetime:
@@ -797,15 +939,29 @@ class SourceResult:
 
 
 class NoData(Exception):
-    """The key never succeeded and the upstream fetch failed (or is in its retry window)."""
+    """No data for this key yet: never fetched successfully, or still fetching past the deadline."""
 
     def __init__(self, source: str):
         super().__init__(source)
         self.source = source
 
 
-class UpstreamCapReached(Exception):
-    pass
+class InlineExecutor(Executor):
+    """Runs submitted work in the caller's thread (deterministic tests)."""
+
+    def submit(self, fn, /, *args, **kwargs) -> Future:
+        f: Future = Future()
+        try:
+            f.set_result(fn(*args, **kwargs))
+        except BaseException as exc:  # pragma: no cover - _refresh never raises
+            f.set_exception(exc)
+        return f
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
 
 
 @dataclass
@@ -813,6 +969,34 @@ class _Entry:
     data: Any
     fetched_at: datetime
     last_failure: datetime | None = None
+
+
+class _DailyBudget:
+    """Upstream calls per UTC day, persisted so a restart does not reset the count."""
+
+    def __init__(self, cap: int | None, path: Path | None):
+        self.cap, self.path = cap, path
+        self.day: date | None = None
+        self.calls = 0
+        if cap is not None and path is not None and path.exists():
+            try:
+                raw = json.loads(path.read_text())
+                self.day, self.calls = date.fromisoformat(raw["day"]), int(raw["calls"])
+            except (OSError, ValueError, KeyError) as exc:
+                log.warning("ignoring unreadable budget file %s: %r", path, exc)
+
+    def take(self, now: datetime) -> bool:
+        """Caller holds the source lock."""
+        if self.cap is None:
+            return True
+        if self.day != now.date():
+            self.day, self.calls = now.date(), 0
+        if self.calls >= self.cap:
+            return False
+        self.calls += 1
+        if self.path is not None:
+            _atomic_write(self.path, json.dumps({"day": self.day.isoformat(), "calls": self.calls}))
+        return True
 
 
 class CachedSource:
@@ -826,149 +1010,199 @@ class CachedSource:
         max_entries: int = 1000,
         daily_cap: int | None = None,
         retry_after: timedelta = timedelta(minutes=5),
+        stale_after: timedelta | None = None,
+        cold_wait_s: float = 8.0,
+        executor: Executor | None = None,
         clock: Callable[[], datetime] = utcnow,
     ):
         self.name = name
         self.fetch = fetch
         self.ttl = ttl
-        self.cache_dir = cache_dir / name if cache_dir else None
+        self.stale_after = stale_after or 2 * ttl
         self.max_entries = max_entries
-        self.daily_cap = daily_cap
         self.retry_after = retry_after
+        self.cold_wait_s = cold_wait_s
+        self.executor = executor or _BACKGROUND
         self.clock = clock
         self.upstream_calls = 0
-        self._entries: OrderedDict[str, _Entry] = OrderedDict()
-        self._miss_failures: OrderedDict[str, datetime] = OrderedDict()
-        self._key_locks: dict[str, threading.Lock] = {}
+        self.cache_dir = cache_dir / name if cache_dir else None
         self._lock = threading.Lock()
-        self._cap_day: date | None = None
-        self._cap_calls = 0
+        self._entries: OrderedDict[str, _Entry] = OrderedDict()      # memory LRU
+        self._files: OrderedDict[str, str | None] = OrderedDict()    # disk LRU: file name -> key if known
+        self._miss_failures: OrderedDict[str, datetime] = OrderedDict()
+        self._inflight: dict[str, Future] = {}
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+            self._scan_disk()
+        self._budget = _DailyBudget(daily_cap, self.cache_dir / "_budget.json" if self.cache_dir else None)
+
+    # -- public ------------------------------------------------------------------
 
     def key_for(self, params: dict) -> str:
         return self.name + ":" + json.dumps(params, sort_keys=True, separators=(",", ":"))
 
-    def get(self, params: dict) -> SourceResult:
+    def get(self, params: dict, deadline: float | None = None) -> SourceResult:
+        """`deadline` is a time.monotonic() value; it bounds only the wait for a cold key."""
         key = self.key_for(params)
         entry = self._lookup(key)
-        if entry and self.clock() - entry.fetched_at < self.ttl:
-            return SourceResult(key, entry.data, entry.fetched_at, False)
-        with self._key_lock(key):
-            entry = self._lookup(key)  # another thread may have refreshed it meanwhile
-            now = self.clock()
-            if entry and now - entry.fetched_at < self.ttl:
-                return SourceResult(key, entry.data, entry.fetched_at, False)
-            if entry and entry.last_failure and now - entry.last_failure < self.retry_after:
-                return SourceResult(key, entry.data, entry.fetched_at, True)
-            if entry is None:
-                with self._lock:
-                    failed = self._miss_failures.get(key)
-                if failed and now - failed < self.retry_after:
-                    raise NoData(self.name)
-            try:
-                self._count_call(now)
-                data = self.fetch(params)
-            except Exception as exc:  # any upstream problem degrades to stale / NoData
-                log.warning("%s: fetch failed for %s: %r", self.name, key, exc)
-                if entry is None:
-                    with self._lock:
-                        self._miss_failures[key] = now
-                        while len(self._miss_failures) > self.max_entries:
-                            self._miss_failures.popitem(last=False)
-                    raise NoData(self.name) from exc
-                entry.last_failure = now
-                return SourceResult(key, entry.data, entry.fetched_at, True)
-            with self._lock:
-                self._miss_failures.pop(key, None)
-            self._store(key, _Entry(data, now))
-            return SourceResult(key, data, now, False)
+        if entry is not None and self.clock() - entry.fetched_at < self.ttl:
+            return self._result(key, entry)
+        future = self._start_refresh(key, params)
+        if future is not None and entry is None:
+            wait([future], timeout=self._wait_budget(deadline))
+        entry = self._lookup(key)
+        if entry is None:
+            raise NoData(self.name)
+        return self._result(key, entry)
 
     def health(self) -> dict:
         with self._lock:
             newest = max((e.fetched_at for e in self._entries.values()), default=None)
             return {
-                "entries": len(self._entries),
+                "entries": len(self._files) if self.cache_dir else len(self._entries),
                 "newest_fetch": newest.isoformat() if newest else None,
                 "upstream_calls": self.upstream_calls,
+                "calls_today": self._budget.calls,
+                "refreshing": len(self._inflight),
             }
 
-    # -- internals -------------------------------------------------------------
+    # -- refresh -----------------------------------------------------------------
 
-    def _key_lock(self, key: str) -> threading.Lock:
-        with self._lock:
-            return self._key_locks.setdefault(key, threading.Lock())
+    def _result(self, key: str, entry: _Entry) -> SourceResult:
+        age = self.clock() - entry.fetched_at
+        if age < self.ttl:
+            return SourceResult(key, entry.data, entry.fetched_at, False)
+        failed = entry.last_failure is not None and entry.last_failure >= entry.fetched_at
+        return SourceResult(key, entry.data, entry.fetched_at, failed or age >= self.stale_after)
 
-    def _count_call(self, now: datetime) -> None:
+    def _wait_budget(self, deadline: float | None) -> float:
+        budget = self.cold_wait_s
+        if deadline is not None:
+            budget = min(budget, deadline - time.monotonic())
+        return max(0.0, budget)
+
+    def _start_refresh(self, key: str, params: dict) -> Future | None:
+        now = self.clock()
         with self._lock:
-            if self.daily_cap is not None:
-                if self._cap_day != now.date():
-                    self._cap_day, self._cap_calls = now.date(), 0
-                if self._cap_calls >= self.daily_cap:
-                    raise UpstreamCapReached(f"{self.name}: daily cap {self.daily_cap} reached")
-                self._cap_calls += 1
+            running = self._inflight.get(key)
+            if running is not None:
+                return running
+            entry = self._entries.get(key)
+            last_failure = entry.last_failure if entry else self._miss_failures.get(key)
+            if last_failure is not None and now - last_failure < self.retry_after:
+                return None
+            if not self._budget.take(now):
+                log.warning("%s: daily upstream budget reached; serving cached data", self.name)
+                self._record_failure(key, now)
+                return None
             self.upstream_calls += 1
+            future: Future = Future()
+            self._inflight[key] = future
+        self.executor.submit(self._refresh, key, params, future)
+        return future
 
-    def _path(self, key: str) -> Path | None:
-        if not self.cache_dir:
-            return None
-        return self.cache_dir / (hashlib.sha256(key.encode()).hexdigest()[:32] + ".json")
+    def _refresh(self, key: str, params: dict, future: Future) -> None:
+        try:
+            data = self.fetch(params)
+        except Exception as exc:  # any upstream problem degrades to stale / NoData
+            log.warning("%s: fetch failed for %s: %r", self.name, key, exc)
+            with self._lock:
+                self._record_failure(key, self.clock())
+        else:
+            self._store(key, _Entry(data, self.clock()))
+            with self._lock:
+                self._miss_failures.pop(key, None)
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+            future.set_result(None)
+
+    def _record_failure(self, key: str, now: datetime) -> None:
+        """Caller holds the lock."""
+        entry = self._entries.get(key)
+        if entry is not None:
+            entry.last_failure = now
+            return
+        self._miss_failures[key] = now
+        self._miss_failures.move_to_end(key)
+        while len(self._miss_failures) > self.max_entries:
+            self._miss_failures.popitem(last=False)
+
+    # -- storage -----------------------------------------------------------------
+
+    def _fname(self, key: str) -> str:
+        return hashlib.sha256(key.encode()).hexdigest()[:32] + ".json"
+
+    def _scan_disk(self) -> None:
+        for stray in self.cache_dir.glob(".*.tmp"):
+            stray.unlink(missing_ok=True)
+        found = sorted(self.cache_dir.glob("[0-9a-f]*.json"), key=lambda p: p.stat().st_mtime)
+        for old in found[:-self.max_entries] if len(found) > self.max_entries else []:
+            old.unlink(missing_ok=True)
+        for p in found[-self.max_entries:]:
+            self._files[p.name] = None
 
     def _lookup(self, key: str) -> _Entry | None:
+        fname = self._fname(key)
         with self._lock:
             entry = self._entries.get(key)
             if entry is not None:
                 self._entries.move_to_end(key)
+                if fname in self._files:
+                    self._files.move_to_end(fname)
                 return entry
-        entry = self._load(key)
+            on_disk = fname in self._files
+        if not on_disk:
+            return None
+        entry = self._load(key, fname)
         if entry is not None:
             self._store(key, entry, persist=False)
         return entry
 
-    def _load(self, key: str) -> _Entry | None:
-        path = self._path(key)
-        if path is None or not path.exists():
-            return None
+    def _load(self, key: str, fname: str) -> _Entry | None:
+        path = self.cache_dir / fname
         try:
             raw = json.loads(path.read_text())
             if raw["key"] != key:
                 return None
             return _Entry(raw["data"], datetime.fromisoformat(raw["fetched_at"]))
         except (OSError, ValueError, KeyError) as exc:
-            log.warning("%s: ignoring unreadable cache file %s: %r", self.name, path.name, exc)
+            log.warning("%s: ignoring unreadable cache file %s: %r", self.name, fname, exc)
             return None
 
     def _store(self, key: str, entry: _Entry, persist: bool = True) -> None:
-        evicted: list[str] = []
+        fname = self._fname(key)
+        doomed: list[str] = []
         with self._lock:
             self._entries[key] = entry
             self._entries.move_to_end(key)
             while len(self._entries) > self.max_entries:
-                old, _ = self._entries.popitem(last=False)
-                self._key_locks.pop(old, None)
-                evicted.append(old)
-        for old in evicted:
-            path = self._path(old)
-            if path:
-                path.unlink(missing_ok=True)
-        path = self._path(key)
-        if persist and path:
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"key": key, "data": entry.data,
-                                       "fetched_at": entry.fetched_at.isoformat()}))
-            tmp.replace(path)
+                self._entries.popitem(last=False)
+            if self.cache_dir:
+                self._files[fname] = key
+                self._files.move_to_end(fname)
+                while len(self._files) > self.max_entries:
+                    old_name, old_key = self._files.popitem(last=False)
+                    doomed.append(old_name)
+                    if old_key is not None:
+                        self._entries.pop(old_key, None)
+        for old_name in doomed:
+            (self.cache_dir / old_name).unlink(missing_ok=True)
+        if persist and self.cache_dir:
+            _atomic_write(self.cache_dir / fname, json.dumps(
+                {"key": key, "data": entry.data, "fetched_at": entry.fetched_at.isoformat()}))
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/test_cached_source.py -v`
-Expected: 12 passed
+Expected: 18 passed
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add server/inkboard_server/sources server/tests/conftest.py server/tests/test_cached_source.py
-git commit -m "Server: CachedSource with stale fallback, disk cache, single-flight, caps
+git commit -m "Server: CachedSource (stale-while-revalidate, deadlines, single-flight, persistent caps)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -992,12 +1226,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `openmeteo.parse_forecast(payload: dict) -> dict`, returning
     `{"current": {"temp": float, "code": int}, "daily": [{"date": str, "code": int, "hi": float, "lo": float}, ...]}`
   - `openmeteo.make_fetch(client: httpx.Client) -> Callable[[dict], dict]`
-  - `Sources(fred: CachedSource, weather: CachedSource)` with:
+  - `Sources(fred: CachedSource, weather: CachedSource, deadline: float | None = None)` with:
+    - `.scoped(deadline: float) -> Sources` (a view whose calls pass that per-request deadline)
     - `.fred_series(fred_id: str) -> SourceResult`
     - `.weather(lat, lon, units, tz: str) -> SourceResult`
     - `.health() -> dict`
     - the attributes `.fred_src`, `.weather_src`
-  - `make_sources(fred_fetch, weather_fetch, *, cache_dir: Path | None, clock=utcnow) -> Sources`
+  - `make_sources(fred_fetch, weather_fetch, *, cache_dir: Path | None, clock=utcnow, executor: Executor | None = None) -> Sources`
   - `build_sources(cache_dir: Path | None, fred_api_key: str, *, client: httpx.Client | None = None, clock=utcnow) -> Sources`
   - conftest additions: `FIXTURES_TODAY: date`, `LA: ZoneInfo`, `FIXED_NOW: datetime`
     (10:00 LA on `FIXTURES_TODAY`), `FakeUpstream`, and the fixtures `upstream` and
@@ -1069,6 +1304,7 @@ from zoneinfo import ZoneInfo
 
 from inkboard_server.sources import make_sources
 from inkboard_server.sources import fred as fred_mod
+from inkboard_server.sources.base import InlineExecutor
 from inkboard_server.sources import openmeteo
 
 LA = ZoneInfo("America/Los_Angeles")
@@ -1110,7 +1346,8 @@ def upstream():
 
 @pytest.fixture
 def sources(tmp_path, upstream, clock):
-    return make_sources(upstream.fred, upstream.weather, cache_dir=tmp_path, clock=clock)
+    return make_sources(upstream.fred, upstream.weather, cache_dir=tmp_path, clock=clock,
+                        executor=InlineExecutor())  # deterministic: refreshes finish inside get()
 ```
 Delete the earlier `clock` fixture (the one returning 2026-09-27 17:00 UTC) so only one
 remains. The Task 3 tests only rely on the clock being a fixed UTC-aware time, which
@@ -1213,6 +1450,13 @@ def test_sources_nodata_when_down(sources, upstream):
         sources.fred_series("SP500")
 
 
+def test_scoped_passes_deadline(sources, upstream):
+    view = sources.scoped(123.0)
+    assert view.deadline == 123.0 and view.fred_src is sources.fred_src
+    assert view.fred_series("SP500").data == sources.fred_series("SP500").data
+    assert upstream.calls["fred"] == 1
+
+
 def test_sources_health(sources):
     sources.fred_series("SP500")
     h = sources.health()
@@ -1313,6 +1557,7 @@ def make_fetch(client: httpx.Client) -> Callable[[dict], dict]:
 `server/inkboard_server/sources/__init__.py`:
 ```python
 """Data sources behind CachedSource, and the Sources facade widgets use."""
+from concurrent.futures import Executor
 from datetime import timedelta
 from pathlib import Path
 
@@ -1331,25 +1576,32 @@ USER_AGENT = "inkboard-server (+https://inkboard.signalwave.dev)"
 
 
 class Sources:
-    def __init__(self, fred_src: CachedSource, weather_src: CachedSource):
+    def __init__(self, fred_src: CachedSource, weather_src: CachedSource, deadline: float | None = None):
         self.fred_src = fred_src
         self.weather_src = weather_src
+        self.deadline = deadline
+
+    def scoped(self, deadline: float) -> "Sources":
+        """Same caches; cold fetches give up at `deadline` (time.monotonic())."""
+        return Sources(self.fred_src, self.weather_src, deadline)
 
     def fred_series(self, fred_id: str) -> SourceResult:
-        return self.fred_src.get({"series_id": fred_id})
+        return self.fred_src.get({"series_id": fred_id}, self.deadline)
 
     def weather(self, lat: float, lon: float, units: str, tz: str) -> SourceResult:
-        return self.weather_src.get(openmeteo.weather_params(lat, lon, units, tz))
+        return self.weather_src.get(openmeteo.weather_params(lat, lon, units, tz), self.deadline)
 
     def health(self) -> dict:
         return {"fred": self.fred_src.health(), "weather": self.weather_src.health()}
 
 
-def make_sources(fred_fetch, weather_fetch, *, cache_dir: Path | None, clock=utcnow) -> Sources:
+def make_sources(fred_fetch, weather_fetch, *, cache_dir: Path | None, clock=utcnow,
+                 executor: Executor | None = None) -> Sources:
     return Sources(
-        CachedSource("fred", fred_fetch, ttl=FRED_TTL, cache_dir=cache_dir, max_entries=64, clock=clock),
+        CachedSource("fred", fred_fetch, ttl=FRED_TTL, cache_dir=cache_dir, max_entries=64,
+                     executor=executor, clock=clock),
         CachedSource("weather", weather_fetch, ttl=WEATHER_TTL, cache_dir=cache_dir,
-                     max_entries=WEATHER_MAX_ENTRIES, daily_cap=WEATHER_DAILY_CAP, clock=clock),
+                     max_entries=WEATHER_MAX_ENTRIES, daily_cap=WEATHER_DAILY_CAP, executor=executor, clock=clock),
     )
 
 
@@ -1363,7 +1615,7 @@ def build_sources(cache_dir: Path | None, fred_api_key: str, *, client: httpx.Cl
 - [ ] **Step 6: Run the whole suite**
 
 Run: `uv run pytest -v`
-Expected: all pass (the Task 1–3 tests plus 11 new ones).
+Expected: all pass (the Task 1–3 tests plus 12 new ones).
 
 - [ ] **Step 7: Commit**
 
@@ -3222,7 +3474,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces:
   - `RateLimiter(capacity=30, per_seconds=3600, clock=time.monotonic, max_keys=10000)`,
     with `.check(key) -> float | None` (None = allowed, otherwise the seconds to wait)
-  - `app.create_app(sources, *, clock=utcnow, limiter: RateLimiter | None = None, registry=None, client_ip_header: str | None = None) -> FastAPI`
+  - `app.create_app(sources, *, clock=utcnow, limiter: RateLimiter | None = None, registry=None, client_ip_header: str | None = None, request_budget_s: float = REQUEST_BUDGET_S) -> FastAPI`
+  - `app.REQUEST_BUDGET_S = 10.0`: the per-request deadline for cold fetches, which keeps
+    the response well under the board's 20 s timeout (spec §6.2)
   - `app.etag_matches(header: str | None, etag: str) -> bool`
   - `main.app` (the production ASGI app)
 
@@ -3317,6 +3571,8 @@ Expected: 3 passed
 `server/tests/test_api.py`:
 ```python
 import io
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -3324,6 +3580,7 @@ from PIL import Image
 
 from inkboard_server.app import create_app, etag_matches
 from inkboard_server.ratelimit import RateLimiter
+from inkboard_server.sources import make_sources
 
 DEFAULT_Q = ("w=market_trends:2/3,calendar_weather:1/3&lat=34.05&lon=-118.24"
              "&tz=America/Los_Angeles&units=imperial")
@@ -3391,6 +3648,53 @@ def test_cold_start_upstream_down(client, upstream):
     upstream.fail = True
     r = client.get(f"/v1/frame.bin?{DEFAULT_Q}")
     assert r.status_code == 200 and len(r.content) == 48000
+
+
+class SlowUpstream:
+    """Answers from fixtures until .hang is set; then every call sleeps, then fails."""
+
+    def __init__(self, inner):
+        self.inner, self.hang = inner, False
+
+    def fred(self, params):
+        if self.hang:
+            time.sleep(2)
+            raise RuntimeError("timeout")
+        return self.inner.fred(params)
+
+    def weather(self, params):
+        if self.hang:
+            time.sleep(2)
+            raise RuntimeError("timeout")
+        return self.inner.weather(params)
+
+
+def test_slow_upstream_after_expiry_answers_fast(tmp_path, upstream, clock):
+    slow = SlowUpstream(upstream)
+    pool = ThreadPoolExecutor(8)
+    src = make_sources(slow.fred, slow.weather, cache_dir=tmp_path, clock=clock, executor=pool)
+    c = TestClient(create_app(src, clock=clock, limiter=RateLimiter(capacity=1000), request_budget_s=0.5))
+    assert c.get(f"/v1/frame.bin?{DEFAULT_Q}").status_code == 200  # cold, fast upstream
+    clock.advance(hours=7)                                         # every entry expired
+    slow.hang = True
+    t0 = time.monotonic()
+    r = c.get(f"/v1/frame.bin?{DEFAULT_Q}")
+    assert r.status_code == 200 and len(r.content) == 48000
+    assert time.monotonic() - t0 < 1.0                             # served cached data, did not wait
+    pool.shutdown(wait=True)
+
+
+def test_slow_upstream_cold_is_bounded_by_budget(tmp_path, upstream, clock):
+    slow = SlowUpstream(upstream)
+    slow.hang = True
+    pool = ThreadPoolExecutor(8)
+    src = make_sources(slow.fred, slow.weather, cache_dir=tmp_path, clock=clock, executor=pool)
+    c = TestClient(create_app(src, clock=clock, limiter=RateLimiter(capacity=1000), request_budget_s=0.5))
+    t0 = time.monotonic()
+    r = c.get(f"/v1/frame.bin?{DEFAULT_Q}")
+    assert r.status_code == 200 and len(r.content) == 48000        # "No data yet" columns
+    assert time.monotonic() - t0 < 1.5                             # one budget, not one per source
+    pool.shutdown(wait=True)
 
 
 def test_bad_query_400(client):
@@ -3484,6 +3788,7 @@ from .widgets import REGISTRY, RenderContext
 
 log = logging.getLogger("inkboard.access")
 FRAME_CACHE_SIZE = 500
+REQUEST_BUDGET_S = 10.0  # the board gives up after 20 s (spec §6.2)
 
 
 @dataclass(frozen=True)
@@ -3529,7 +3834,8 @@ def _calibration() -> RenderedFrame:
 
 
 def create_app(sources, *, clock: Callable = utcnow, limiter: RateLimiter | None = None,
-               registry=None, client_ip_header: str | None = None) -> FastAPI:
+               registry=None, client_ip_header: str | None = None,
+               request_budget_s: float = REQUEST_BUDGET_S) -> FastAPI:
     registry = REGISTRY if registry is None else registry
     limiter = limiter or RateLimiter()
     cache = FrameCache(FRAME_CACHE_SIZE)
@@ -3565,7 +3871,9 @@ def create_app(sources, *, clock: Callable = utcnow, limiter: RateLimiter | None
         now = clock().astimezone(req.tz)
         ctx = RenderContext(today=now.date(), tz=req.tz)
         widgets = [registry[s.type_name](s.size, req.options) for s in req.widgets]
-        results = fetch_widgets(widgets, sources, ctx)
+        # Expired entries are served at once (refreshed in the background); only cold keys
+        # wait, and never past this request's deadline.
+        results = fetch_widgets(widgets, sources.scoped(time.monotonic() + request_budget_s), ctx)
         key = (req.canonical, ctx.today.isoformat(), frame_versions(results))
         frame = cache.get(key)
         if frame is None:
@@ -3846,23 +4154,23 @@ In the repo root `README.md`:
 - Change `- [ ] Data sources (weather, calendar, ...)` to
   `- [x] Data sources (FRED markets, Open-Meteo weather)`.
 
-- [ ] **Step 2: Build and run the container**
+- [ ] **Step 2: Build and run the container (without touching `.env`)**
 
 ```bash
-docker compose build
-docker compose run --rm -d --name inkboard-smoke -p 127.0.0.1:8091:8000 inkboard
+docker build -t inkboard-server:smoke .
+docker run --rm -d --name inkboard-smoke -p 127.0.0.1:8091:8000 inkboard-server:smoke
 sleep 4
 curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:8091/v1/test.png"
 curl -s "http://127.0.0.1:8091/healthz"
 docker stop inkboard-smoke
+CLOUDFLARE_TUNNEL_TOKEN=dummy FRED_API_KEY= docker compose config -q && echo compose-ok
 ```
-Before `docker compose build`, create a `.env` with empty values:
-`printf 'FRED_API_KEY=\nCLOUDFLARE_TUNNEL_TOKEN=\n' > .env`. The `run` command starts only
-the `inkboard` service, so the empty tunnel token doesn't matter here. `docker compose up`
-would refuse to start without it, by design.
-
-Expected: `200`, then health JSON. Port 8091 is used for this smoke test so it can't
-collide with a long-running compose instance on 8090, or with ERPNext on 8080.
+Expected: `200`, then health JSON, then `compose-ok`.
+- Port 8091 can't collide with a running compose instance (8090) or ERPNext (8080).
+- The smoke container runs without a FRED key or tunnel, and never reads or writes
+  `server/.env`.
+- `compose config -q` only validates the YAML. The dummy token is set in that one
+  command's environment and nothing is started.
 
 - [ ] **Step 3: Run the full test suite one last time**
 
