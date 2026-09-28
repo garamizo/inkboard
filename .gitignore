@@ -3,3 +3,4 @@
 !.vscode/extensions.json
 include/secrets.h
 *.pyc
+.superpowers/
