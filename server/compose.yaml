@@ -1,0 +1,38 @@
+# inkboard render server at inkboard.signalwave.dev. The tunnel's public hostname points at the
+# Docker service name http://inkboard:8000, which only resolves on this Compose network. Do not
+# also run cloudflared for this tunnel as a host service: two connectors split the traffic.
+name: inkboard
+
+services:
+  inkboard:
+    build: .
+    restart: unless-stopped
+    environment:
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Cloudflare overwrites this header with the real client IP; the port below is
+      # loopback-only, so it cannot be spoofed from outside the tunnel.
+      INKBOARD_CLIENT_IP_HEADER: CF-Connecting-IP
+    ports:
+      - "127.0.0.1:8090:8000"   # local checks only
+    volumes:
+      - cache:/cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env}
+    depends_on:
+      inkboard:
+        condition: service_healthy
+
+volumes:
+  cache:

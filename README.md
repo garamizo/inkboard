@@ -27,19 +27,21 @@ platformio.ini       build config (pinned platform + libraries)
 include/pins.h       every GPIO assignment, mirrors docs/wiring.md
 src/main.cpp         current firmware: hardware smoke test + refresh soak test
 extras/minimal/      bare display check (pio run -e minimal), mirrors the kit's firmware
+server/              render server (Python): widgets, data sources, HTTP API
 docs/
   hardware.md        what each board does, how the e-paper HAT works
   wiring.md          connection table, pin budget, battery + speaker plans
   smoke-test.md      flashing, expected output, troubleshooting
   toolchain.md       language / framework choice and commands
+  cloudflare-tunnel.md  publishing the server at inkboard.signalwave.dev
 ```
 
 ## Roadmap
 
 - [x] Hardware smoke test
 - [ ] Wi-Fi provisioning + NTP clock
-- [ ] Dashboard layout engine (widgets on a grid)
-- [ ] Data sources (weather, calendar, ...)
+- [x] Dashboard layout engine (server-rendered widgets, see server/)
+- [x] Data sources (FRED markets, Open-Meteo weather)
 - [ ] Deep-sleep update cycle + battery voltage
 - [ ] Speaker output (I2S)
 - [ ] OTA updates
