@@ -102,7 +102,7 @@ frame-cache key.
 | Header | Value |
 |---|---|
 | `ETag` | `"<sha256 of frame bytes, first 16 hex>"`. The request's `If-None-Match` is compared against it, and a match returns **304** with no body. |
-| `X-Next-Refresh-Seconds` | Seconds until the next top of the hour, or until 00:01 local if that comes first, computed in the request's `tz`. Always 300–21600. |
+| `X-Next-Refresh-Seconds` | Seconds until one minute past the next local top of the hour (so the midnight wake lands at 00:01, after the date has changed), computed in the request's `tz`. Always 300–21600. |
 | `Cache-Control` | `no-cache` (the ETag drives revalidation). |
 | `X-UTC-Offset-Seconds` | The request tz's current UTC offset, used for the device's offline badge time. |
 | `Retry-After` | On 429 only. |
@@ -243,11 +243,16 @@ class Widget(ABC):
 
 ### 3.6 Next-refresh schedule
 
-- `schedule.next_refresh(now_local)` returns the seconds until the earlier of:
-  - the next top of the hour, or
-  - 00:01 local tomorrow.
-- The result is clamped to 300–21600 s. For example, 11:58 gives 300 s, not 120 s.
-- The computation uses zoneinfo, so DST days (23 or 25 hours) are handled correctly.
+- `schedule.next_refresh_seconds(now_local)` returns the seconds until **one minute past
+  the next local top of the hour**.
+  - The minute of slack means a device clock running a little fast still wakes after
+    the hour. That matters at midnight: the frame must already show the new date.
+  - An earlier draft said "the next hour, or 00:01 if earlier". That was a bug: the
+    next top of the hour always comes before 00:01, so the midnight branch never won.
+- The result is clamped to 300–21600 s. For example, 11:58 gives 300 s, not 180 s.
+- The next top of the hour is found in UTC and converted to local time. This handles
+  DST days (23 or 25 hours) and zones whose offset is not a whole hour (for example
+  Asia/Kolkata at +5:30).
 
 ## 4. Rendering conventions
 
