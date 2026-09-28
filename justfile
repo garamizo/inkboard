@@ -1,5 +1,8 @@
 # inkboard: firmware (PlatformIO) + render server (server/). `just` lists the recipes.
 
+# Recipes run in PowerShell on Windows (bash recipes such as `up` and `dev` are for the Linux server).
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
 public_url := "https://inkboard.signalwave.dev"
 local_url := "http://127.0.0.1:18440"
 # The default board layout (same as FRAME_QUERY in the firmware config).
@@ -64,9 +67,9 @@ check:
       echo "frame: not available"
     fi
 
-# Flash firmware and open the serial monitor; ENV: supermini-c6 (dashboard, default), smoke, minimal.
-flash ENV="supermini-c6":
-    pio run -e {{ENV}} -t upload -t monitor
+# Flash + serial monitor (Linux and Windows). TARGET: prod, dev (this machine's `just dev`), smoke, minimal.
+flash TARGET="prod":
+    uv run --no-project tools/flash.py {{TARGET}}
 
 # Serial console.
 monitor:

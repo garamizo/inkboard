@@ -15,6 +15,7 @@ case.
 ```bash
 uv tool install platformio
 pio run -e smoke -t upload -t monitor   # flashes the hardware smoke test (just flash smoke)
+just flash            # dashboard firmware (prod API); `just flash dev` targets this machine's `just dev`
 ```
 
 Wire it first: [docs/wiring.md](docs/wiring.md). Then check the results against
@@ -44,6 +45,6 @@ docs/
 - [ ] Wi-Fi provisioning + NTP clock
 - [x] Dashboard layout engine (server-rendered widgets, see server/)
 - [x] Data sources (FRED markets, Open-Meteo weather)
-- [ ] Deep-sleep update cycle + battery voltage
+- [x] Deep-sleep update cycle (battery voltage still to do)
 - [ ] Speaker output (I2S)
 - [ ] OTA updates
