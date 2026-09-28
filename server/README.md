@@ -16,6 +16,9 @@ http://127.0.0.1:8765/v1/frame.png?w=market_trends:2/3,calendar_weather:1/3&lat=
 
 ## Deploy
 
+Production runs from a clean checkout of `main` (`~/inkboard`); `just up` refuses anything else.
+Develop with `just dev` (port 8765, its own `.cache`, no tunnel), so production is never touched.
+
     cp .env.example .env              # set FRED_API_KEY and CLOUDFLARE_TUNNEL_TOKEN
     docker compose up -d --build
     docker compose logs -f cloudflared   # "Registered tunnel connection"

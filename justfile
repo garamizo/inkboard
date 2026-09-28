@@ -12,15 +12,27 @@ _default:
 test *ARGS:
     cd server && uv run pytest -q {{ARGS}}
 
-# Run the server locally with auto-reload on :8765 (uses server/.env if present).
+# Dev server with auto-reload on :8765, reachable on the LAN; never touches production.
 dev:
-    cd server && set -a && { [ -f .env ] && . ./.env || true; } && set +a && \
-      uv run uvicorn inkboard_server.main:app --reload --port 8765
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd server
+    set -a; [[ -f .env ]] && . ./.env; set +a
+    ip=$(hostname -I | awk '{print $1}')
+    echo "dev server: http://127.0.0.1:8765"
+    echo "for a board on the LAN, set SERVER_URL in include/config.h to \"http://$ip:8765\""
+    exec uv run uvicorn inkboard_server.main:app --reload --host 0.0.0.0 --port 8765
 
-# Build and start the server + cloudflared (docs/cloudflare-tunnel.md).
+# Deploy production (server + cloudflared) from a clean checkout of main.
 up:
     #!/usr/bin/env bash
     set -euo pipefail
+    branch=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$branch" != main || -n "$(git status --porcelain)" ]] && [[ "${INKBOARD_DEPLOY_ANY:-}" != 1 ]]; then
+      echo "just up deploys production: run it from a clean checkout of main (on '$branch' now)." >&2
+      echo "Use 'just dev' for development. Override once with: INKBOARD_DEPLOY_ANY=1 just up" >&2
+      exit 1
+    fi
     cd server
     [[ -f .env ]] || { echo "Copy server/.env.example to server/.env and fill it in." >&2; exit 1; }
     set -a; . ./.env; set +a
