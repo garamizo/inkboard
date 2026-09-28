@@ -1,0 +1,4 @@
+.venv/
+.cache/
+tests/goldens/*.actual.png
+__pycache__/
