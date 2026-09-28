@@ -67,11 +67,11 @@ check:
       echo "frame: not available"
     fi
 
-# Flash + serial monitor (Linux and Windows). ENV: supermini-c6 (dashboard, prod API), smoke, minimal.
-flash ENV="supermini-c6":
-    pio run -e {{ENV}} -t upload -t monitor
+# Flash the production dashboard firmware + serial monitor (Linux and Windows).
+flash:
+    pio run -e supermini-c6 -t upload -t monitor
 
-# Dev build against this machine's `just dev` (deep sleep off; Linux). ENV: supermini-c6, smoke.
+# Dev build against this machine's `just dev` (deep sleep off; Linux). ENV: supermini-c6, smoke, minimal.
 flash-dev ENV="supermini-c6":
     #!/usr/bin/env bash
     set -euo pipefail

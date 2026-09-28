@@ -14,7 +14,7 @@ case.
 
 ```bash
 uv tool install platformio
-pio run -e smoke -t upload -t monitor   # flashes the hardware smoke test (just flash smoke)
+just flash-dev smoke  # hardware smoke test + Wi-Fi/server check (dev only)
 just flash            # dashboard firmware (prod API); `just flash-dev` targets this machine's `just dev`
 ```
 
