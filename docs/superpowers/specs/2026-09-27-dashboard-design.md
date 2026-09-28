@@ -104,6 +104,7 @@ frame-cache key.
 | `ETag` | `"<sha256 of frame bytes, first 16 hex>"`. The request's `If-None-Match` is compared against it, and a match returns **304** with no body. |
 | `X-Next-Refresh-Seconds` | Seconds until the next top of the hour, or until 00:01 local if that comes first, computed in the request's `tz`. Always 300–21600. |
 | `Cache-Control` | `no-cache` (the ETag drives revalidation). |
+| `X-UTC-Offset-Seconds` | The request tz's current UTC offset, used for the device's offline badge time. |
 | `Retry-After` | On 429 only. |
 
 ## 3. Server design
@@ -195,6 +196,9 @@ class Widget(ABC):
     (a Docker volume), so a restart does not re-fetch everything.
   - When the TTL expires it fetches again. If that fetch fails, it returns the last good
     value with `stale=True`.
+  - Every result is a `SourceResult(data, fetched_at, stale)`. `fetched_at` is the time
+    of the last *successful* fetch. These three fields are the source's **version**, and
+    they are exactly what rendering can see: no other source metadata reaches a widget.
   - Concurrent requests for the same key share one in-flight fetch.
   - Upstream timeouts are 10 s.
 - **FRED:**
@@ -204,14 +208,24 @@ class Widget(ABC):
     served from one cache entry.
   - At most 4 × catalog-size upstream calls every 6 h, no matter how many boards there are.
 - **Open-Meteo:**
-  - Cached for 30 min per `(round(lat,1), round(lon,1), units)`.
+  - Cached for 30 min per `(round(lat,1), round(lon,1), units, tz)`. `tz` is part of the
+    key because Open-Meteo's daily boundaries, dates and "today" high/low depend on the
+    `timezone` sent upstream. Two boards at the same place in different timezones get
+    separate entries.
   - LRU cap of 2,000 locations.
   - A daily global cap of 8,000 upstream calls, which keeps us under the free tier's
     10k/day for non-commercial use. Past the cap, sources serve stale data.
 - **Frame cache:** an LRU of rendered frames (cap 500), keyed by
-  `(normalized query, local date in the request tz, data versions of the widget's
-  sources)`. Rendering is deterministic for a given key, which is what makes the ETag
-  stable and a 304 possible.
+  `(normalized query, local date in the request tz, the (cache key, fetched_at, stale)
+  tuple of every source the widgets used)`.
+  - Rendering is a pure function of that key, which is what makes the ETag stable and a
+    304 possible.
+  - A source going stale, or a successful refetch (which moves `fetched_at` and so the
+    footer time), always changes the key. That produces a new frame and a new ETag, so
+    the stale warning can never be hidden behind a cached frame or a 304.
+  - Trade-off: weather refetches every 30 min, so most hourly wakes get a 200 and a full
+    refresh. The 304 path mainly saves a panel refresh when the device wakes early, for
+    example after a retry, or when a board shows only market data.
 
 ### 3.5 Public-service protections
 
@@ -359,11 +373,22 @@ visual style:
 - `include/secrets.h` (already gitignored) holds `WIFI_SSID` and `WIFI_PASSWORD`.
   `secrets.h.example` is committed.
 - The Let's Encrypt ISRG Root X1 certificate is embedded for TLS.
+- **Last-good frame store:** LittleFS on the existing `spiffs` data partition of
+  `min_spiffs.csv` holds `/frame.bin` (48,000 bytes) and `/etag.txt`.
+  - It is written only after a 200, and only when the ETag changed: at most about 24
+    writes a day, well within LittleFS wear levelling.
+  - Writes go to a temp file first, then a rename, so a power cut mid-write never leaves
+    a torn frame.
+  - Space: the partition is 128 KB (32 × 4 KB blocks). The frame plus its temp copy use
+    about 24 blocks, which fits. Nothing else may be stored there.
+  - Flash survives deep sleep and power loss; RTC memory and the controller's RAM do not.
+    The stored frame is the only copy of what the panel shows.
 
 ### 6.2 Wake cycle
 
-RTC memory (`RTC_DATA_ATTR`) holds: `etag[40]`, `fail_count`, `showing_badge`,
-`showing_error`.
+RTC memory (`RTC_DATA_ATTR`) holds: `fail_count`, `showing_badge`, `showing_error`,
+`last_ok_epoch`, `slept_s`. The ETag is read from `/etag.txt`, so a power cycle doesn't
+force a redundant refresh.
 
 1. **Boot.** Enable the status LED briefly as a heartbeat.
 2. **Connect to Wi-Fi.** Timeout 15 s.
@@ -372,10 +397,11 @@ RTC memory (`RTC_DATA_ATTR`) holds: `etag[40]`, `fail_count`, `showing_badge`,
 4. **Handle the response:**
    - **200 with exactly 48,000 bytes:** PWR HIGH, `display.init(…)`,
      `writeImage(buf, 0, 0, 800, 480, invert)`, `refresh(false)` (full), `hibernate()`,
-     PWR LOW. Store the ETag. Reset `fail_count`, `showing_badge` and `showing_error`.
-   - **304:** skip the panel and reset `fail_count`. If `showing_badge` is set, the badge
-     was drawn over an otherwise current frame, so clear the ETag and refetch
-     immediately to get a 200 and a clean screen.
+     PWR LOW. Save the frame and ETag to LittleFS. Set `last_ok_epoch` from the
+     response `Date` header. Reset `fail_count`, `showing_badge` and `showing_error`.
+   - **304:** reset `fail_count` and update `last_ok_epoch`. If `showing_badge` or
+     `showing_error` is set, redraw `/frame.bin` from flash with a full refresh (no
+     refetch) and clear the flag. Otherwise leave the panel alone.
    - **400:** draw the response text (at most 256 characters) on a plain error screen
      with GxEPD2 fonts: the title "inkboard config error", the message, and
      `FRAME_QUERY`. Set `showing_error` and clear the ETag.
@@ -391,12 +417,20 @@ RTC memory (`RTC_DATA_ATTR`) holds: `etag[40]`, `fail_count`, `showing_badge`,
 - Don't touch the panel. The last good image stays up with no power.
 - Increment `fail_count`. The next sleep is 300 s, then 900 s, then 3600 s for the third
   failure and beyond. On a 429, `Retry-After` is used if it is longer.
-- When `fail_count` reaches 3 and no badge is shown yet:
-  - Draw an "offline since h:mm" badge in the bottom-right footer area using a partial
-    window write followed by one full refresh.
-  - The time comes from the last successful fetch's `Date` header, kept in RTC memory,
-    plus the elapsed sleep time.
+- When `fail_count` reaches 3, no badge is shown yet, and `/frame.bin` exists:
+  - Load the whole stored frame from flash into the buffer, and draw an "offline since
+    h:mm" badge into the buffer's bottom-right footer area. The badge is a
+    black-bordered white box, drawn by a small bitmap-font routine that writes into
+    the 1-bit buffer.
+  - Write the complete buffer to the panel with one **full** refresh. There is no
+    partial write: the controller lost its RAM when the HAT was powered off, so a
+    partial window would leave the rest of the panel undefined.
+  - The time is `last_ok_epoch`, converted with a fixed UTC offset that the server
+    sends in `X-UTC-Offset-Seconds` and is kept in RTC memory. The firmware has no tz
+    database.
   - Set `showing_badge`.
+- If no frame is stored (first boot while offline), show nothing new. The panel keeps
+  whatever it had.
 
 ### 6.4 Deferred
 
@@ -431,6 +465,15 @@ RTC memory (`RTC_DATA_ATTR`) holds: `etag[40]`, `fail_count`, `showing_badge`,
 - **API** (FastAPI TestClient with fake sources):
   - 200 with 48,000 bytes and headers.
   - 304 on a matching ETag.
+  - **Staleness can't hide:** prime a fresh frame and record its ETag, force the TTL to
+    expire, and make the source fail while returning the same last-good data. The next
+    request must return 200 with a **new** ETag, and the footer must show `⚠ stale`
+    (checked by rendering the footer region against a golden).
+  - A successful refetch with unchanged observations still changes the ETag, because
+    the footer time moved.
+  - **Cross-timezone weather:** the same rounded coordinates and units with
+    `tz=America/Los_Angeles` and `tz=Asia/Tokyo` produce two upstream calls and two
+    cache entries. Includes a request just after local midnight in one of them.
   - 400 reasons.
   - 429 after the bucket empties.
   - `/v1/frame.png` matches the `.bin` pixels.
@@ -443,7 +486,9 @@ RTC memory (`RTC_DATA_ATTR`) holds: `etag[40]`, `fail_count`, `showing_badge`,
 - `pio run` builds every environment (`supermini-c6`, `smoke`, `minimal`,
   `minimal-kit-pins`).
 - Host-side unit tests (`pio test -e native`) for the pure logic: backoff sequence, sleep
-  clamping and ETag header handling, factored into a header-only module.
+  clamping, the wake-cycle decision table (200/304/400/failure × badge/error flags →
+  actions), and the badge overlay drawing into a 1-bit buffer. These live in a
+  header-only module with no Arduino dependencies.
 
 ### 7.3 Hardware checklist (`docs/dashboard-bringup.md`)
 
@@ -451,8 +496,10 @@ RTC memory (`RTC_DATA_ATTR`) holds: `etag[40]`, `fail_count`, `showing_badge`,
    and that the checkerboard isn't inverted. Set the `invert` constant accordingly.
 2. First boot shows the dashboard and matches `/v1/frame.png` in a browser.
 3. The next wake, with no data change, gets a 304 and the panel doesn't flash.
-4. Stop the server. After three wakes the offline badge appears. Restart the server;
-   the next wake clears it.
+4. Stop the server. After three real deep-sleep cycles, with the HAT powered off in
+   between, the offline badge appears **over the intact last dashboard**. Restart the
+   server; the next wake removes the badge. Also power-cycle the board while offline and
+   confirm the stored frame survives.
 5. Set a bad `FRAME_QUERY`: the config error screen appears with the server's reason.
 6. Measure deep-sleep current and awake time per cycle, and record them in
    `docs/hardware.md`.
