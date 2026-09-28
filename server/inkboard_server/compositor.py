@@ -59,7 +59,7 @@ def _message(img: Image.Image, box: Box, text: str) -> None:
     d.text((box.x + box.w / 2, box.y + box.h / 2), text, font=font(14, bold=True), fill=0, anchor="mm")
 
 
-def compose(widgets: list[Widget], results, ctx: RenderContext) -> Image.Image:
+def compose(widgets: list[Widget], results, ctx: RenderContext, version: str = "") -> Image.Image:
     img = new_canvas()
     x, dividers = 0, []
     for w, r in zip(widgets, results):
@@ -79,15 +79,17 @@ def compose(widgets: list[Widget], results, ctx: RenderContext) -> Image.Image:
     d = drawer(img)
     for dx in dividers:  # after rendering: widgets paste over their whole box
         d.line([(dx, 8), (dx, WIDGET_H - 8)], fill=0)
-    _footer(d, widgets, results, ctx)
+    _footer(d, widgets, results, ctx, version)
     return img
 
 
-def _footer(d: ImageDraw.ImageDraw, widgets, results, ctx: RenderContext) -> None:
+def _footer(d: ImageDraw.ImageDraw, widgets, results, ctx: RenderContext, version: str) -> None:
     d.line([(0, WIDGET_H), (WIDTH, WIDGET_H)], fill=0)
     left = footer_time_text(results, ctx.tz)
     if any(isinstance(r, WidgetData) and r.stale for r in results):
         left += "   ⚠ stale"
+    if version:
+        left += f"   {version}"
     y = WIDGET_H + FOOTER_H // 2
     d.text((8, y), left, font=font(10), fill=0, anchor="lm")
     attrs: list[str] = []
@@ -98,5 +100,5 @@ def _footer(d: ImageDraw.ImageDraw, widgets, results, ctx: RenderContext) -> Non
     d.text((WIDTH - 8, y), " · ".join(attrs), font=font(10), fill=0, anchor="rm")
 
 
-def render_frame(widgets: list[Widget], results, ctx: RenderContext) -> Image.Image:
-    return to_1bit(compose(widgets, results, ctx))
+def render_frame(widgets: list[Widget], results, ctx: RenderContext, version: str = "") -> Image.Image:
+    return to_1bit(compose(widgets, results, ctx, version))

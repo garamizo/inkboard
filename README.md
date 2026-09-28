@@ -120,6 +120,7 @@ uses); regenerate it with `tools/gen_ca_certs.sh` if your certificate chains to 
 ## Layout
 
 ```
+VERSION              release version (dashboard footer, board User-Agent); dev builds add -<git hash>
 platformio.ini       build config (pinned platform + libraries)
 justfile             common commands: `just` lists them (test, up, check, preview, flash, ...)
 include/pins.h       every GPIO assignment, mirrors docs/wiring.md

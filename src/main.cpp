@@ -65,6 +65,7 @@ static void deep_sleep(int32_t seconds) {
 
 void setup() {
   Serial.begin(115200);
+  Serial.printf("inkboard %s\n", INKBOARD_VERSION);
   // Keep the HAT off while awake: drive PWR LOW before releasing the deep-sleep hold,
   // otherwise GPIO1 floats (no pull-down on the switch) during Wi-Fi and the fetch.
   pinMode(PIN_EPD_PWR, OUTPUT);

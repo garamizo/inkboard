@@ -7,6 +7,12 @@
 #define SERVER_URL "https://inkboard.signalwave.dev"
 #endif
 
+// Firmware version, sent as the User-Agent and shown in the dashboard footer. Set by
+// tools/version.py from the repo's VERSION file; `just flash-dev` adds -<git hash>.
+#ifndef INKBOARD_VERSION
+#define INKBOARD_VERSION "dev"
+#endif
+
 // This board's layout and options (spec §2.2). Preview it in a browser at
 // SERVER_URL/v1/frame.png?<FRAME_QUERY>.
 #define FRAME_QUERY \

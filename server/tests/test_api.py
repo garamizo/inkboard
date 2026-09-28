@@ -177,3 +177,25 @@ def test_healthz_and_index(client):
     assert set(h) == {"fred", "weather"}
     page = client.get("/")
     assert page.status_code == 200 and "market_trends" in page.text and "calendar_weather" in page.text
+
+
+@pytest.fixture
+def versioned_client(sources, clock):
+    return TestClient(create_app(sources, clock=clock, limiter=RateLimiter(capacity=1000),
+                                 version="1.0.0"))
+
+
+def test_firmware_version_is_part_of_the_frame(versioned_client):
+    url = f"/v1/frame.bin?{DEFAULT_Q}"
+    old = versioned_client.get(url, headers={"User-Agent": "inkboard/1.0"})
+    new = versioned_client.get(url, headers={"User-Agent": "inkboard/1.0.0"})
+    again = versioned_client.get(url, headers={"User-Agent": "inkboard/1.0.0"})
+    assert old.headers["etag"] != new.headers["etag"]
+    assert new.headers["etag"] == again.headers["etag"]
+
+
+def test_footer_shows_versions(versioned_client, golden):
+    png = versioned_client.get(f"/v1/frame.png?{DEFAULT_Q}",
+                               headers={"User-Agent": "inkboard/1.0.0-c9d8ef2"})
+    footer = Image.open(io.BytesIO(png.content)).convert("1").crop((0, 464, 800, 480))
+    golden("api_footer_versions", footer)

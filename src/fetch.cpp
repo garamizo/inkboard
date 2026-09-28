@@ -56,7 +56,7 @@ wake::Fetched fetch_frame(const char* etag, uint8_t* buf) {
   http.useHTTP10(true);  // no chunked encoding: a plain body of Content-Length bytes, or until close
   http.setConnectTimeout(8000);
   http.setTimeout(10000);  // per wait for headers/data
-  http.setUserAgent("inkboard/1.0");
+  http.setUserAgent("inkboard/" INKBOARD_VERSION);
   if (!http.begin(tls ? static_cast<NetworkClient&>(secure) : plain, url)) return r;
   static const char* keys[] = {"ETag", "X-Next-Refresh-Seconds", "X-UTC-Offset-Seconds", "Date", "Retry-After"};
   http.collectHeaders(keys, 5);

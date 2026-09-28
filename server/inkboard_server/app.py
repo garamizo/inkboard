@@ -22,6 +22,7 @@ from .ratelimit import RateLimiter
 from .schedule import next_refresh_seconds, utc_offset_seconds
 from .series import CATALOG
 from .sources.base import utcnow
+from .version import firmware_version, version_label
 from .widgets import REGISTRY, RenderContext
 
 log = logging.getLogger("inkboard.access")
@@ -73,7 +74,7 @@ def _calibration() -> RenderedFrame:
 
 def create_app(sources, *, clock: Callable = utcnow, limiter: RateLimiter | None = None,
                registry=None, client_ip_header: str | None = None,
-               request_budget_s: float = REQUEST_BUDGET_S) -> FastAPI:
+               request_budget_s: float = REQUEST_BUDGET_S, version: str | None = None) -> FastAPI:
     registry = REGISTRY if registry is None else registry
     limiter = limiter or RateLimiter()
     cache = FrameCache(FRAME_CACHE_SIZE)
@@ -112,10 +113,12 @@ def create_app(sources, *, clock: Callable = utcnow, limiter: RateLimiter | None
         # Expired entries are served at once (refreshed in the background); only cold keys
         # wait, and never past this request's deadline.
         results = fetch_widgets(widgets, sources.scoped(time.monotonic() + request_budget_s), ctx)
-        key = (req.canonical, ctx.today.isoformat(), frame_versions(results))
+        # The footer shows the board's firmware version, so it is part of the frame.
+        label = version_label(firmware_version(request.headers.get("user-agent")), version)
+        key = (req.canonical, ctx.today.isoformat(), frame_versions(results), label)
         frame = cache.get(key)
         if frame is None:
-            img = render_frame(widgets, results, ctx)
+            img = render_frame(widgets, results, ctx, label)
             bits = pack(img)
             frame = RenderedFrame(bits, etag_for(bits), img)
             cache.put(key, frame)

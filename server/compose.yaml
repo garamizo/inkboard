@@ -5,7 +5,10 @@ name: inkboard
 
 services:
   inkboard:
-    build: .
+    build:
+      context: .
+      args:
+        INKBOARD_VERSION: ${INKBOARD_VERSION:-dev}
     restart: unless-stopped
     environment:
       FRED_API_KEY: ${FRED_API_KEY:-}

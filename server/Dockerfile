@@ -7,6 +7,9 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY inkboard_server ./inkboard_server
 RUN uv sync --frozen --no-dev
 ENV INKBOARD_CACHE_DIR=/cache
+# `just up` passes the repo's VERSION; the image has no repo to read it from.
+ARG INKBOARD_VERSION=dev
+ENV INKBOARD_VERSION=$INKBOARD_VERSION
 RUN mkdir -p /cache && chown nobody /cache
 VOLUME /cache
 EXPOSE 8000

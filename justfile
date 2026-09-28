@@ -74,7 +74,8 @@ dev:
     cd server
     set -a; [[ -f .env ]] && . ./.env; set +a
     ip=$(hostname -I | awk '{print $1}')
-    echo "dev server: http://127.0.0.1:8765"
+    export INKBOARD_VERSION="$(cat ../VERSION)-$(git rev-parse --short HEAD)"
+    echo "dev server $INKBOARD_VERSION: http://127.0.0.1:8765"
     echo "for a board on the LAN, set SERVER_URL in include/config.h to \"http://$ip:8765\""
     exec uv run uvicorn inkboard_server.main:app --reload --host 0.0.0.0 --port 8765
 
@@ -94,6 +95,7 @@ up:
     for name in FRED_API_KEY CLOUDFLARE_TUNNEL_TOKEN; do
       [[ -n "${!name:-}" ]] || { echo "Set $name in server/.env." >&2; exit 1; }
     done
+    export INKBOARD_VERSION="$(cat ../VERSION)"
     docker compose up -d --build
     docker compose ps
 
@@ -129,7 +131,8 @@ flash-dev ENV="supermini-c6":
     #!/usr/bin/env bash
     set -euo pipefail
     url="${INKBOARD_DEV_URL:-http://$(hostname -I | awk '{print $1}'):8765}"
-    echo "dev firmware -> $url (keep 'just dev' running here)"
+    export INKBOARD_VERSION="$(cat VERSION)-$(git rev-parse --short HEAD)"
+    echo "dev firmware $INKBOARD_VERSION -> $url (keep 'just dev' running here)"
     export PLATFORMIO_BUILD_FLAGS="-DSERVER_URL=\\\"$url\\\" -DINKBOARD_DEEP_SLEEP=0"
     pio run -e {{ENV}}
     # The board's USB port only exists while it is awake (a few seconds per wake). Wait for

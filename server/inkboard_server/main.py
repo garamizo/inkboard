@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .app import create_app
 from .sources import build_sources
+from .version import server_version
 
 
 def configure_logging(level: str) -> None:
@@ -20,4 +21,5 @@ if not _key:
     logging.getLogger(__name__).warning("FRED_API_KEY is not set: market widgets will show 'No data yet'")
 
 app = create_app(build_sources(Path(os.environ.get("INKBOARD_CACHE_DIR", ".cache")), _key),
-                 client_ip_header=os.environ.get("INKBOARD_CLIENT_IP_HEADER") or None)
+                 client_ip_header=os.environ.get("INKBOARD_CLIENT_IP_HEADER") or None,
+                 version=server_version(os.environ))
