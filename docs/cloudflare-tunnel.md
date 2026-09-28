@@ -72,7 +72,7 @@ docker compose logs -f cloudflared    # wait for "Registered tunnel connection" 
 - **Don't also install `cloudflared` as a host service** with this token. Two connectors
   split the traffic, and the host one can't resolve `inkboard:8000`. If one exists, remove
   it with `sudo cloudflared service uninstall`.
-- The container publishes `127.0.0.1:8090` for local checks only. Nothing listens on a
+- The container publishes `127.0.0.1:18440` for local checks only. Nothing listens on a
   public interface.
 
 ## Client IPs and the rate limit
@@ -101,7 +101,7 @@ docker compose logs -f cloudflared    # wait for "Registered tunnel connection" 
 ## Checks
 
 ```bash
-curl -s http://127.0.0.1:8090/healthz                       # local: {"fred": {...}, "weather": {...}}
+curl -s http://127.0.0.1:18440/healthz                       # local: {"fred": {...}, "weather": {...}}
 curl -sI https://inkboard.signalwave.dev/v1/test.png | head -5   # public: HTTP/2 200, content-type image/png
 curl -s -o /dev/null -w '%{http_code}\n' "https://inkboard.signalwave.dev/v1/frame.png?w=market_trends:1"  # 400
 curl -sI "https://inkboard.signalwave.dev/v1/frame.png?w=market_trends:2/3,calendar_weather:1/3&lat=34.05&lon=-118.24&tz=America/Los_Angeles" \

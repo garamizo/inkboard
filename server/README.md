@@ -20,7 +20,7 @@ http://127.0.0.1:8765/v1/frame.png?w=market_trends:2/3,calendar_weather:1/3&lat=
     docker compose logs -f cloudflared   # "Registered tunnel connection"
 
 Public traffic arrives through the Cloudflare Tunnel (`cloudflared` service); the server
-itself is only published on 127.0.0.1:8090 for local checks. One-time Cloudflare setup,
+itself is only published on 127.0.0.1:18440 for local checks. One-time Cloudflare setup,
 cache and bot settings, and checks: `../docs/cloudflare-tunnel.md`. The cache lives in the
 `cache` volume.
 
