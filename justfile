@@ -75,15 +75,21 @@ flash ENV="supermini-c6":
 flash-dev:
     #!/usr/bin/env bash
     set -euo pipefail
-    port=$(ls /dev/ttyACM* 2>/dev/null | head -1 || true)
-    if [[ -z "$port" ]]; then
-      echo "Board not on USB: its USB port is off while it deep-sleeps." >&2
-      echo "Hold BOOT, tap RESET, release BOOT (bootloader keeps USB up), then retry." >&2
-      exit 1
-    fi
     url="${INKBOARD_DEV_URL:-http://$(hostname -I | awk '{print $1}'):8765}"
-    echo "dev firmware -> $url via $port (keep 'just dev' running here)"
-    PLATFORMIO_UPLOAD_PORT="$port" PLATFORMIO_MONITOR_PORT="$port" PLATFORMIO_BUILD_FLAGS="-DSERVER_URL=\\\"$url\\\"" pio run -e supermini-c6 -t upload -t monitor
+    echo "dev firmware -> $url (keep 'just dev' running here)"
+    export PLATFORMIO_BUILD_FLAGS="-DSERVER_URL=\\\"$url\\\""
+    pio run -e supermini-c6
+    # The board's USB port only exists while it is awake (a few seconds per wake). Wait for
+    # it, then upload at once: esptool resets the chip into the bootloader over USB itself.
+    echo "waiting for the board to wake (up to 7 min; or hold BOOT, tap RESET, release BOOT)..."
+    for _ in $(seq 1 2100); do
+      port=$(ls /dev/ttyACM* 2>/dev/null | head -1 || true)
+      [[ -n "$port" ]] && break
+      sleep 0.2
+    done
+    [[ -n "$port" ]] || { echo "board never appeared on USB" >&2; exit 1; }
+    PLATFORMIO_UPLOAD_PORT="$port" PLATFORMIO_MONITOR_PORT="$port" \
+      pio run -e supermini-c6 -t nobuild -t upload -t monitor
 
 # Serial console.
 monitor:
