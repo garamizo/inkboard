@@ -14,7 +14,7 @@ case.
 
 ```bash
 uv tool install platformio
-pio run -t upload -t monitor     # flashes the hardware smoke test
+pio run -e smoke -t upload -t monitor   # flashes the hardware smoke test (just flash smoke)
 ```
 
 Wire it first: [docs/wiring.md](docs/wiring.md). Then check the results against
@@ -26,7 +26,8 @@ Wire it first: [docs/wiring.md](docs/wiring.md). Then check the results against
 platformio.ini       build config (pinned platform + libraries)
 justfile             common commands: `just` lists them (test, up, check, preview, flash, ...)
 include/pins.h       every GPIO assignment, mirrors docs/wiring.md
-src/main.cpp         current firmware: hardware smoke test + refresh soak test
+src/                 dashboard firmware (thin client, see docs/dashboard-bringup.md)
+extras/smoke/        hardware smoke test + refresh soak test (pio run -e smoke)
 extras/minimal/      bare display check (pio run -e minimal), mirrors the kit's firmware
 server/              render server (Python): widgets, data sources, HTTP API
 docs/

@@ -12,7 +12,7 @@ assemble the case, while the wires are still easy to reach.
 3. Flash and watch:
 
    ```bash
-   pio run -t upload -t monitor
+   pio run -e smoke -t upload -t monitor
    ```
 
    If the upload can't connect, hold **BOOT**, tap **RESET**, release **BOOT**, and retry.

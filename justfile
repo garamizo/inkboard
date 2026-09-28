@@ -64,7 +64,7 @@ check:
       echo "frame: not available"
     fi
 
-# Flash firmware and open the serial monitor; ENV: supermini-c6 (default), minimal, ...
+# Flash firmware and open the serial monitor; ENV: supermini-c6 (dashboard, default), smoke, minimal.
 flash ENV="supermini-c6":
     pio run -e {{ENV}} -t upload -t monitor
 
