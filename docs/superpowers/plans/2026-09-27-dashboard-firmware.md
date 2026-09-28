@@ -13,6 +13,10 @@ config-error screen when needed. Then it deep-sleeps for as long as the server s
   - `wake_logic.h`: the outcome classification, the sleep/backoff maths and the decision table.
   - `http_time.h`: parse the `Date` header and format the badge text.
   - `badge.h`: a 5×7 font that draws the badge into the 1-bit frame.
+  - `body_reader.h`: reads a body of exactly 48,000 bytes, checked against
+    `Content-Length` or the connection closing.
+  - `cycle.h`: the whole wake cycle as a template over the hardware operations, so its
+    ordering and recovery sequences are tested on the host.
 - **Hardware glue**, each part in its own file in `src/`: `frame_store` (LittleFS),
   `panel` (GxEPD2), `fetch` (Wi-Fi + HTTP/HTTPS). `main.cpp` wires them into a single
   wake cycle.
@@ -82,8 +86,10 @@ include/
   wake_logic.h                 classify, parse_seconds, sleep/backoff, decide (pure)
   http_time.h                  parse_http_date, format_clock, badge_text (pure)
   badge.h                      5x7 font + draw_badge into 1-bit frame (pure)
+  body_reader.h                exact-length HTTP body reader over any stream (pure)
+  cycle.h                      run_cycle<Ops>: one wake, save-after-show, cold-boot recovery (pure)
 src/
-  main.cpp                     one wake cycle, then deep sleep
+  main.cpp                     BoardOps (hardware) -> wake::run_cycle, then deep sleep
   frame_store.h/.cpp           LittleFS: load/save frame + etag
   panel.h/.cpp                 GxEPD2: show frame, show error screen, power sequencing
   fetch.h/.cpp                 Wi-Fi connect/off, GET frame.bin with headers
@@ -168,7 +174,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     `BADGE_AFTER_FAILURES = 3`
   - `enum class Outcome { Frame200, NotModified304, BadRequest400, Failure }`
   - `enum class Draw { Nothing, NewFrame, StoredFrame, StoredFrameWithBadge, ErrorScreen }`
-  - `struct State { uint8_t fail_count; bool showing_badge; bool showing_error; }`
+  - `struct State { uint8_t fail_count; bool showing_badge; bool showing_error; bool panel_dirty; }`
+  - `State cold_boot_state()`, which marks the panel content as unknown
   - `struct Plan { Draw draw; bool save_frame; bool clear_etag; State next; }`
   - `Outcome classify(int http_status, int32_t body_bytes)`
   - `int32_t parse_seconds(const char* s)`, which returns -1 if the value is missing or
@@ -206,7 +213,9 @@ using namespace wake;
 void setUp() {}
 void tearDown() {}
 
-static State S(uint8_t fails, bool badge, bool error) { return State{fails, badge, error}; }
+static State S(uint8_t fails, bool badge, bool error, bool dirty = false) {
+  return State{fails, badge, error, dirty};
+}
 
 void test_classify_200_needs_exact_length() {
   TEST_ASSERT_TRUE(classify(200, 48000) == Outcome::Frame200);
@@ -249,8 +258,9 @@ void test_backoff() {
 }
 
 void test_200_draws_and_saves_and_clears_flags() {
-  Plan p = decide(Outcome::Frame200, S(5, true, true), true);
+  Plan p = decide(Outcome::Frame200, S(5, true, true, true), true);
   TEST_ASSERT_TRUE(p.draw == Draw::NewFrame);
+  TEST_ASSERT_FALSE(p.next.panel_dirty);
   TEST_ASSERT_TRUE(p.save_frame);
   TEST_ASSERT_FALSE(p.clear_etag);
   TEST_ASSERT_EQUAL_UINT8(0, p.next.fail_count);
@@ -323,6 +333,24 @@ void test_failure_keeps_error_screen() {
   TEST_ASSERT_TRUE(p.next.showing_error);
 }
 
+void test_cold_boot_304_restores_clean_frame() {
+  Plan p = decide(Outcome::NotModified304, cold_boot_state(), true);
+  TEST_ASSERT_TRUE(p.draw == Draw::StoredFrame);
+  TEST_ASSERT_FALSE(p.next.panel_dirty);
+}
+
+void test_cold_boot_still_badges_after_three_failures() {
+  State s = cold_boot_state();
+  Draw last = Draw::Nothing;
+  for (int i = 0; i < 3; i++) {
+    Plan p = decide(Outcome::Failure, s, true);
+    last = p.draw;
+    s = p.next;
+  }
+  TEST_ASSERT_TRUE(last == Draw::StoredFrameWithBadge);
+  TEST_ASSERT_FALSE(s.panel_dirty);
+}
+
 void test_sleep_for() {
   TEST_ASSERT_EQUAL_INT32(3660, sleep_for(Outcome::Frame200, 0, 3660, -1, 3600));
   TEST_ASSERT_EQUAL_INT32(3600, sleep_for(Outcome::NotModified304, 0, -1, -1, 3600));
@@ -345,6 +373,8 @@ int main(int, char**) {
   RUN_TEST(test_failures_saturate_and_badge_once);
   RUN_TEST(test_failure_without_stored_frame_never_badges);
   RUN_TEST(test_failure_keeps_error_screen);
+  RUN_TEST(test_cold_boot_304_restores_clean_frame);
+  RUN_TEST(test_cold_boot_still_badges_after_three_failures);
   RUN_TEST(test_sleep_for);
   return UNITY_END();
 }
@@ -378,7 +408,11 @@ struct State {
   uint8_t fail_count;
   bool showing_badge;
   bool showing_error;
+  bool panel_dirty;  // the panel's content is unknown (cold boot): restore on the next success
 };
+
+// After power loss the e-paper still shows whatever it last had (maybe the badge).
+inline State cold_boot_state() { return State{0, false, false, true}; }
 
 struct Plan {
   Draw draw;
@@ -437,14 +471,14 @@ inline Plan decide(Outcome outcome, State s, bool frame_stored) {
     case Outcome::Frame200:
       p.draw = Draw::NewFrame;
       p.save_frame = true;
-      p.next = State{0, false, false};
+      p.next = State{0, false, false, false};
       break;
     case Outcome::NotModified304:
       p.next.fail_count = 0;
-      if (s.showing_badge || s.showing_error) {
+      if (s.showing_badge || s.showing_error || s.panel_dirty) {
         if (frame_stored) {
           p.draw = Draw::StoredFrame;  // put the clean frame back
-          p.next.showing_badge = p.next.showing_error = false;
+          p.next.showing_badge = p.next.showing_error = p.next.panel_dirty = false;
         } else {
           p.clear_etag = true;         // can't restore locally: force a 200 next wake
         }
@@ -452,7 +486,7 @@ inline Plan decide(Outcome outcome, State s, bool frame_stored) {
       break;
     case Outcome::BadRequest400:
       p.clear_etag = true;
-      p.next = State{0, false, true};
+      p.next = State{0, false, true, false};
       if (!s.showing_error) p.draw = Draw::ErrorScreen;
       break;
     case Outcome::Failure:
@@ -460,6 +494,7 @@ inline Plan decide(Outcome outcome, State s, bool frame_stored) {
       if (p.next.fail_count >= BADGE_AFTER_FAILURES && !s.showing_badge && !s.showing_error && frame_stored) {
         p.draw = Draw::StoredFrameWithBadge;
         p.next.showing_badge = true;
+        p.next.panel_dirty = false;
       }
       break;
   }
@@ -487,7 +522,7 @@ inline int32_t sleep_for(Outcome outcome, uint8_t fail_count_after, int32_t next
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `pio test -e native 2>&1 | tail -5`
-Expected: `14 Tests 0 Failures 0 Ignored` and `PASSED`.
+Expected: `16 Tests 0 Failures 0 Ignored` and `PASSED`.
 
 - [ ] **Step 6: Commit**
 
@@ -634,7 +669,7 @@ inline void badge_text(char* out, size_t n, int64_t last_ok_epoch, int32_t utc_o
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pio test -e native 2>&1 | tail -5`
-Expected: `18 Tests 0 Failures 0 Ignored`.
+Expected: `20 Tests 0 Failures 0 Ignored`.
 
 The expected epochs were computed with Python:
 `calendar.timegm((2026,9,27,19,39,5))` = 1790537945 and
@@ -834,7 +869,7 @@ inline Rect draw_badge(uint8_t* frame, const char* text, int scale = 2) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `pio test -e native 2>&1 | tail -5`
-Expected: `23 Tests 0 Failures 0 Ignored`.
+Expected: `25 Tests 0 Failures 0 Ignored`.
 
 - [ ] **Step 5: Commit**
 
@@ -847,7 +882,471 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: The thin-client firmware
+### Task 5: Bounded HTTP body reader (host-tested)
+
+**Files:**
+- Create: `include/body_reader.h`
+- Modify: `test/test_logic/test_main.cpp`
+
+**Why (plan-review finding):** stopping at 48,000 bytes and checking only whether
+another byte is *immediately* available would accept an oversized body whose extra bytes
+arrive a little later. The reader has to establish that the body really ended.
+
+**Interfaces:**
+- Produces:
+  `template <class Stream, class Now, class Idle> int32_t body::read_exact(Stream& s, uint8_t* buf, int32_t expect, int32_t content_length, uint32_t timeout_ms, Now now_ms, Idle idle)`
+  - It returns `expect` only for a complete body of exactly `expect` bytes, and -1 otherwise.
+  - `content_length` comes from the header, or is -1 when the header is absent (the body
+    then ends when the server closes the connection).
+  - `Stream` needs `int available()`, `int read(uint8_t*, size_t)` and `bool connected()`.
+    Arduino's `NetworkClient` has these.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add `#include "body_reader.h"` after `#include "badge.h"`, and these before `main`:
+```cpp
+// A stream whose bytes arrive at simulated times; the reader's idle() advances the clock.
+static uint32_t g_now;
+
+struct FakeStream {
+  struct Chunk { uint32_t at; int32_t len; };
+  Chunk chunks[4];
+  int n = 0;
+  uint32_t close_at = 0xFFFFFFFFu;  // never, unless set
+  int32_t consumed = 0;
+  void add(uint32_t at, int32_t len) { chunks[n++] = Chunk{at, len}; }
+  int32_t arrived() const {
+    int32_t a = 0;
+    for (int i = 0; i < n; i++)
+      if (chunks[i].at <= g_now) a += chunks[i].len;
+    return a;
+  }
+  int available() { return static_cast<int>(arrived() - consumed); }
+  int read(uint8_t* buf, size_t want) {
+    int32_t k = static_cast<int32_t>(want) < available() ? static_cast<int32_t>(want) : available();
+    for (int32_t i = 0; i < k; i++) buf[i] = static_cast<uint8_t>(consumed + i);
+    consumed += k;
+    return static_cast<int>(k);
+  }
+  bool connected() { return g_now < close_at || available() > 0; }
+};
+
+static uint8_t g_body[48000];
+
+static int32_t read_body(FakeStream& s, int32_t content_length, uint32_t timeout_ms = 20000) {
+  g_now = 0;
+  return body::read_exact(s, g_body, 48000, content_length, timeout_ms,
+                          [] { return g_now; }, [] { g_now += 5; });
+}
+
+void test_reader_declared_length_in_pieces() {
+  FakeStream s;
+  s.add(0, 20000);
+  s.add(300, 28000);
+  TEST_ASSERT_EQUAL_INT32(48000, read_body(s, 48000));
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(47999), g_body[47999]);
+}
+
+void test_reader_rejects_wrong_declared_length() {
+  FakeStream s;
+  s.add(0, 48001);
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(s, 48001));
+  TEST_ASSERT_EQUAL_INT32(0, s.consumed);            // didn't even start reading
+}
+
+void test_reader_close_delimited_exact() {
+  FakeStream s;
+  s.add(0, 48000);
+  s.close_at = 50;
+  TEST_ASSERT_EQUAL_INT32(48000, read_body(s, -1));
+}
+
+void test_reader_rejects_delayed_trailing_bytes() {
+  FakeStream s;
+  s.add(0, 48000);
+  s.add(500, 1);                                     // arrives after a pause
+  s.close_at = 1000;
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(s, -1));
+}
+
+void test_reader_rejects_truncated_body() {
+  FakeStream a;
+  a.add(0, 47000);
+  a.close_at = 100;
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(a, -1));
+  FakeStream b;
+  b.add(0, 47000);
+  b.close_at = 100;
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(b, 48000));
+}
+
+void test_reader_times_out_when_body_never_ends() {
+  FakeStream s;
+  s.add(0, 48000);                                   // close-delimited, but never closes
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(s, -1, 2000));
+  FakeStream slow;
+  slow.add(0, 1000);
+  slow.add(30000, 47000);                            // rest arrives after the timeout
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(slow, 48000, 20000));
+}
+
+void test_reader_declared_length_ignores_open_connection() {
+  FakeStream s;
+  s.add(0, 48000);                                   // keep-alive: never closes, length says done
+  TEST_ASSERT_EQUAL_INT32(48000, read_body(s, 48000));
+}
+```
+Register them in `main`:
+```cpp
+  RUN_TEST(test_reader_declared_length_in_pieces);
+  RUN_TEST(test_reader_rejects_wrong_declared_length);
+  RUN_TEST(test_reader_close_delimited_exact);
+  RUN_TEST(test_reader_rejects_delayed_trailing_bytes);
+  RUN_TEST(test_reader_rejects_truncated_body);
+  RUN_TEST(test_reader_times_out_when_body_never_ends);
+  RUN_TEST(test_reader_declared_length_ignores_open_connection);
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `pio test -e native 2>&1 | tail -5`
+Expected: a compile error, `body_reader.h: No such file or directory`.
+
+- [ ] **Step 3: Implement `include/body_reader.h`**
+
+```cpp
+#pragma once
+// Reads an HTTP body that must be exactly `expect` bytes (spec §2.3: 48,000). Generic
+// over the stream and clock so it runs on the host in tests.
+#include <stddef.h>
+#include <stdint.h>
+
+namespace body {
+
+// Returns `expect` for a complete body of exactly that size, else -1.
+// content_length: the header's value, or -1 when absent (body ends at connection close).
+template <class Stream, class Now, class Idle>
+int32_t read_exact(Stream& s, uint8_t* buf, int32_t expect, int32_t content_length, uint32_t timeout_ms,
+                   Now now_ms, Idle idle) {
+  if (content_length >= 0 && content_length != expect) return -1;
+  const uint32_t start = now_ms();
+  int32_t got = 0;
+  while (got < expect) {
+    if (now_ms() - start > timeout_ms) return -1;
+    int avail = s.available();
+    if (avail > 0) {
+      int32_t want = expect - got < avail ? expect - got : avail;
+      int n = s.read(buf + got, static_cast<size_t>(want));
+      if (n <= 0) return -1;
+      got += n;
+    } else if (!s.connected()) {
+      return -1;  // closed early: truncated
+    } else {
+      idle();
+    }
+  }
+  if (content_length == expect) return got;  // the declared length says the body is done
+  // No declared length: the body ends only when the server closes, and nothing may follow.
+  while (now_ms() - start <= timeout_ms) {
+    if (s.available() > 0) return -1;
+    if (!s.connected()) return got;
+    idle();
+  }
+  return -1;
+}
+
+}  // namespace body
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `pio test -e native 2>&1 | tail -5`
+Expected: `32 Tests 0 Failures 0 Ignored`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add include/body_reader.h test/test_logic/test_main.cpp
+git commit -m "Firmware: bounded HTTP body reader (exact length, delayed/extra/truncated bytes)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 6: The wake cycle, generic over hardware (host-tested)
+
+**Files:**
+- Create: `include/cycle.h`
+- Modify: `test/test_logic/test_main.cpp`
+
+**Why (plan-review findings):**
+- The order of operations matters. The frame and ETag are saved only **after** the panel
+  has shown the frame; saved first, a power cut in between would leave the next wake's
+  304 answering for a panel that never updated.
+- After a cold boot the panel's contents are unknown, and the first 304 must restore the
+  clean stored frame.
+
+Putting the cycle in a template over an `Ops` type lets the host tests check these
+sequences directly.
+
+**Interfaces:**
+- Consumes: `wake_logic.h` (with `panel_dirty`), `http_time.h`, `badge.h`.
+- Produces (in namespace `wake`):
+  - `RTC_MAGIC`
+  - `struct Rtc { uint32_t magic; State state; int64_t last_ok_epoch; int32_t utc_offset_s; }`
+  - `struct Fetched { Outcome outcome; int http_status; int32_t next_refresh_s; int32_t utc_offset_s; int64_t date_epoch; int32_t retry_after_s; char etag[40]; char message[257]; }`
+  - `template <class Ops> int32_t run_cycle(Ops& ops, Rtc& rtc, uint8_t* frame, int32_t fallback_s)`,
+    which returns the seconds to sleep
+  - `Ops` must provide:
+    - `bool store_ok()`
+    - `void load_etag(char*, size_t)`
+    - `bool has_frame()`
+    - `bool load_frame(uint8_t*)`
+    - `bool save(const uint8_t*, const char*)`
+    - `void clear_etag()`
+    - `Fetched fetch(const char* etag, uint8_t* buf)`
+    - `void show(const uint8_t*)`
+    - `void show_error(const char*)`
+
+- [ ] **Step 1: Write the failing tests**
+
+Add `#include "cycle.h"` after `#include "body_reader.h"`, and these before `main`:
+```cpp
+struct FakeOps {
+  bool fs = true;
+  bool stored = false;
+  uint8_t disk[48000];
+  char disk_etag[40] = "";
+  wake::Fetched next;
+  uint8_t body_fill = 0xFF;
+  char log[128] = "";
+  char etag_at_show[40] = "";
+  uint8_t shown[48000];
+
+  void ev(const char* e) { strcat(log, e); strcat(log, " "); }
+  bool store_ok() { return fs; }
+  void load_etag(char* out, size_t n) { strncpy(out, disk_etag, n - 1); out[n - 1] = '\0'; }
+  bool has_frame() { return stored; }
+  bool load_frame(uint8_t* b) {
+    ev("load");
+    if (!stored) return false;
+    memcpy(b, disk, sizeof disk);
+    return true;
+  }
+  bool save(const uint8_t* b, const char* e) {
+    ev("save");
+    memcpy(disk, b, sizeof disk);
+    strcpy(disk_etag, e);
+    stored = true;
+    return true;
+  }
+  void clear_etag() { ev("clear"); disk_etag[0] = '\0'; }
+  wake::Fetched fetch(const char*, uint8_t* buf) {
+    ev("fetch");
+    if (next.outcome == wake::Outcome::Frame200) memset(buf, body_fill, 48000);
+    return next;
+  }
+  void show(const uint8_t* b) { ev("show"); strcpy(etag_at_show, disk_etag); memcpy(shown, b, sizeof shown); }
+  void show_error(const char*) { ev("error"); }
+};
+
+static FakeOps g_ops;          // large buffers: keep them off the stack
+static wake::Rtc g_rtc;
+static uint8_t g_cycle_frame[48000];
+
+static wake::Fetched F(wake::Outcome o, const char* etag = "") {
+  wake::Fetched f;
+  f.outcome = o;
+  f.next_refresh_s = 3660;
+  f.date_epoch = 1790537945LL;   // Sun, 27 Sep 2026 19:39:05 GMT
+  f.utc_offset_s = -25200;
+  strcpy(f.etag, etag);
+  return f;
+}
+
+static int32_t cycle(wake::Fetched f) {
+  g_ops.next = f;
+  g_ops.log[0] = '\0';
+  return wake::run_cycle(g_ops, g_rtc, g_cycle_frame, 3600);
+}
+
+static void fresh_board() {
+  g_ops = FakeOps();
+  g_rtc = wake::Rtc{};  // magic 0: cold boot
+}
+
+void test_cycle_saves_etag_only_after_showing() {
+  fresh_board();
+  g_ops.stored = true;
+  strcpy(g_ops.disk_etag, "\"old\"");
+  TEST_ASSERT_EQUAL_INT32(3660, cycle(F(wake::Outcome::Frame200, "\"new\"")));
+  TEST_ASSERT_EQUAL_STRING("fetch show save ", g_ops.log);
+  TEST_ASSERT_EQUAL_STRING("\"old\"", g_ops.etag_at_show);   // a power cut during show keeps the old tag
+  TEST_ASSERT_EQUAL_STRING("\"new\"", g_ops.disk_etag);
+}
+
+void test_cycle_cold_boot_304_restores_stored_frame() {
+  fresh_board();
+  g_ops.stored = true;
+  memset(g_ops.disk, 0xAA, sizeof g_ops.disk);
+  strcpy(g_ops.disk_etag, "\"e\"");
+  cycle(F(wake::Outcome::NotModified304));
+  TEST_ASSERT_EQUAL_STRING("fetch load show ", g_ops.log);
+  TEST_ASSERT_EQUAL_HEX8(0xAA, g_ops.shown[123]);
+  cycle(F(wake::Outcome::NotModified304));                     // now known: leave it alone
+  TEST_ASSERT_EQUAL_STRING("fetch ", g_ops.log);
+}
+
+void test_cycle_badge_on_third_failure_over_stored_frame() {
+  fresh_board();
+  cycle(F(wake::Outcome::Frame200, "\"a\""));                  // white frame shown and stored
+  TEST_ASSERT_EQUAL_INT32(300, cycle(F(wake::Outcome::Failure)));
+  TEST_ASSERT_EQUAL_STRING("fetch ", g_ops.log);
+  TEST_ASSERT_EQUAL_INT32(900, cycle(F(wake::Outcome::Failure)));
+  TEST_ASSERT_EQUAL_INT32(3600, cycle(F(wake::Outcome::Failure)));
+  TEST_ASSERT_EQUAL_STRING("fetch load show ", g_ops.log);
+  TEST_ASSERT_TRUE(badge::is_black(g_ops.shown, 795, 477));  // badge border, bottom-right
+  TEST_ASSERT_FALSE(badge::is_black(g_ops.shown, 10, 10));   // rest of the stored frame
+  TEST_ASSERT_EQUAL_HEX8(0xFF, g_ops.disk[47999]);            // flash copy stays clean
+  cycle(F(wake::Outcome::NotModified304));                     // back online: clean frame again
+  TEST_ASSERT_EQUAL_STRING("fetch load show ", g_ops.log);
+  TEST_ASSERT_FALSE(badge::is_black(g_ops.shown, 795, 477));
+}
+
+void test_cycle_power_loss_with_badge_then_304_clears_it() {
+  fresh_board();
+  cycle(F(wake::Outcome::Frame200, "\"a\""));
+  for (int i = 0; i < 3; i++) cycle(F(wake::Outcome::Failure));   // badge on the panel
+  g_rtc = wake::Rtc{};                                              // power loss
+  cycle(F(wake::Outcome::NotModified304));
+  TEST_ASSERT_EQUAL_STRING("fetch load show ", g_ops.log);
+  TEST_ASSERT_FALSE(badge::is_black(g_ops.shown, 795, 477));
+}
+
+void test_cycle_config_error_drawn_once() {
+  fresh_board();
+  cycle(F(wake::Outcome::Frame200, "\"a\""));
+  TEST_ASSERT_EQUAL_INT32(3600, cycle(F(wake::Outcome::BadRequest400)));
+  TEST_ASSERT_EQUAL_STRING("fetch clear error ", g_ops.log);
+  cycle(F(wake::Outcome::BadRequest400));
+  TEST_ASSERT_EQUAL_STRING("fetch clear ", g_ops.log);
+}
+```
+Register them in `main`:
+```cpp
+  RUN_TEST(test_cycle_saves_etag_only_after_showing);
+  RUN_TEST(test_cycle_cold_boot_304_restores_stored_frame);
+  RUN_TEST(test_cycle_badge_on_third_failure_over_stored_frame);
+  RUN_TEST(test_cycle_power_loss_with_badge_then_304_clears_it);
+  RUN_TEST(test_cycle_config_error_drawn_once);
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `pio test -e native 2>&1 | tail -5`
+Expected: a compile error, `cycle.h: No such file or directory`.
+
+- [ ] **Step 3: Implement `include/cycle.h`**
+
+```cpp
+#pragma once
+// One wake cycle (spec §6.2-6.3), generic over the hardware (`Ops`) so the ordering and
+// recovery sequences are host-tested. src/main.cpp supplies the real Ops.
+#include <stddef.h>
+#include <stdint.h>
+
+#include "badge.h"
+#include "http_time.h"
+#include "wake_logic.h"
+
+namespace wake {
+
+constexpr uint32_t RTC_MAGIC = 0x1B0A4D02;
+
+// Lives in RTC memory: survives deep sleep, lost on power loss (magic mismatch).
+struct Rtc {
+  uint32_t magic;
+  State state;
+  int64_t last_ok_epoch;
+  int32_t utc_offset_s;
+};
+
+struct Fetched {
+  Outcome outcome = Outcome::Failure;
+  int http_status = -1;
+  int32_t next_refresh_s = -1;       // X-Next-Refresh-Seconds, -1 if missing
+  int32_t utc_offset_s = INT32_MIN;  // X-UTC-Offset-Seconds, INT32_MIN if missing
+  int64_t date_epoch = -1;           // Date, -1 if missing
+  int32_t retry_after_s = -1;        // Retry-After, -1 if missing
+  char etag[40] = "";                // new ETag (200 only)
+  char message[257] = "";            // body of a 400
+};
+
+template <class Ops>
+int32_t run_cycle(Ops& ops, Rtc& rtc, uint8_t* frame, int32_t fallback_s) {
+  if (rtc.magic != RTC_MAGIC) rtc = Rtc{RTC_MAGIC, cold_boot_state(), 0, 0};
+  const bool fs = ops.store_ok();
+  char etag[40] = "";
+  if (fs) ops.load_etag(etag, sizeof etag);
+
+  const Fetched r = ops.fetch(etag, frame);
+  const bool stored = fs && ops.has_frame();
+  const Plan p = decide(r.outcome, rtc.state, stored);
+  if (r.outcome == Outcome::Frame200 || r.outcome == Outcome::NotModified304) {
+    if (r.date_epoch > 0) rtc.last_ok_epoch = r.date_epoch;
+    if (r.utc_offset_s != INT32_MIN) rtc.utc_offset_s = r.utc_offset_s;
+  }
+  if (p.clear_etag && fs) ops.clear_etag();
+
+  switch (p.draw) {
+    case Draw::NewFrame:
+      ops.show(frame);
+      // Only after the panel shows it: a tag saved earlier would, after a power cut, make
+      // the next wake's 304 vouch for a panel that never got this frame.
+      if (p.save_frame && fs) ops.save(frame, r.etag);
+      break;
+    case Draw::StoredFrame:
+      if (ops.load_frame(frame)) ops.show(frame);
+      break;
+    case Draw::StoredFrameWithBadge:
+      if (ops.load_frame(frame)) {
+        char text[32];
+        httptime::badge_text(text, sizeof text, rtc.last_ok_epoch, rtc.utc_offset_s);
+        badge::draw_badge(frame, text);  // the copy in flash stays clean
+        ops.show(frame);
+      }
+      break;
+    case Draw::ErrorScreen:
+      ops.show_error(r.message);
+      break;
+    case Draw::Nothing:
+      break;
+  }
+  rtc.state = p.next;
+  return sleep_for(r.outcome, rtc.state.fail_count, r.next_refresh_s, r.retry_after_s, fallback_s);
+}
+
+}  // namespace wake
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `pio test -e native 2>&1 | tail -5`
+Expected: `37 Tests 0 Failures 0 Ignored`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add include/cycle.h test/test_logic/test_main.cpp
+git commit -m "Firmware: wake cycle over an Ops interface (save ETag after show, cold-boot recovery)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 7: The thin-client firmware
 
 **Files:**
 - Create: `include/config.h`, `include/secrets.h.example`, `tools/gen_ca_certs.sh`,
@@ -856,7 +1355,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `platformio.ini` (`board_build.filesystem = littlefs`), `README.md` (roadmap)
 
 **Interfaces:**
-- Consumes: everything in `wake_logic.h`, `http_time.h` and `badge.h` (Tasks 2–4), plus
+- Consumes: `wake_logic.h`, `http_time.h`, `badge.h`, `body_reader.h` and `cycle.h` (Tasks 2–6), plus
   `include/pins.h`.
 - Produces:
   - `frame_store`:
@@ -872,10 +1371,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `fetch`:
     - `bool wifi_connect(uint32_t timeout_ms)`
     - `void wifi_off()`
-    - `FetchResult fetch_frame(const char* etag, uint8_t* buf)`
+    - `wake::Fetched fetch_frame(const char* etag, uint8_t* buf)`
+  - `main.cpp`: a `BoardOps` wrapper that hands everything to `wake::run_cycle` (Task 6).
 
 This task has no host tests. The code is thin glue around hardware, and its logic lives
-in the headers tested in Tasks 2–4. The gate is a clean `pio run`; behaviour is checked on
+in the headers tested in Tasks 2–6. The gate is a clean `pio run`; behaviour is checked on
 the board in Task 6.
 
 - [ ] **Step 1: Config, secrets template, CA bundle**
@@ -1108,26 +1608,14 @@ void panel_show_error(const char* message, const char* query) {
 `src/fetch.h`:
 ```cpp
 #pragma once
-#include <stddef.h>
 #include <stdint.h>
 
-#include "wake_logic.h"
-
-struct FetchResult {
-  wake::Outcome outcome = wake::Outcome::Failure;
-  int http_status = -1;
-  int32_t next_refresh_s = -1;          // X-Next-Refresh-Seconds, -1 if missing
-  int32_t utc_offset_s = INT32_MIN;     // X-UTC-Offset-Seconds, INT32_MIN if missing
-  int64_t date_epoch = -1;              // Date header, -1 if missing
-  int32_t retry_after_s = -1;           // Retry-After (429), -1 if missing
-  char etag[40] = "";                   // new ETag (200 only)
-  char message[257] = "";               // body of a 400
-};
+#include "cycle.h"
 
 bool wifi_connect(uint32_t timeout_ms);
 void wifi_off();
-// GET SERVER_URL/v1/frame.bin?FRAME_QUERY (or the calibration pattern); body into buf.
-FetchResult fetch_frame(const char* etag, uint8_t* buf);
+// GET SERVER_URL/v1/frame.bin?FRAME_QUERY (or the calibration pattern); the body goes into buf.
+wake::Fetched fetch_frame(const char* etag, uint8_t* buf);
 ```
 
 `src/fetch.cpp`:
@@ -1140,6 +1628,7 @@ FetchResult fetch_frame(const char* etag, uint8_t* buf);
 #include <WiFi.h>
 #include <string.h>
 
+#include "body_reader.h"
 #include "ca_certs.h"
 #include "config.h"
 #include "http_time.h"
@@ -1161,27 +1650,8 @@ void wifi_off() {
   WiFi.mode(WIFI_OFF);
 }
 
-static int32_t read_body(NetworkClient* stream, uint8_t* buf, int32_t cap, uint32_t timeout_ms) {
-  int32_t got = 0;
-  uint32_t start = millis();
-  while (got < cap && millis() - start < timeout_ms) {
-    int avail = stream->available();
-    if (avail > 0) {
-      int32_t want = cap - got < avail ? cap - got : avail;
-      got += stream->read(buf + got, want);
-    } else if (!stream->connected()) {
-      break;
-    } else {
-      delay(5);
-    }
-  }
-  // One more byte available means the body is longer than a frame: not ours.
-  if (got == cap && stream->available() > 0) return cap + 1;
-  return got;
-}
-
-FetchResult fetch_frame(const char* etag, uint8_t* buf) {
-  FetchResult r;
+wake::Fetched fetch_frame(const char* etag, uint8_t* buf) {
+  wake::Fetched r;
   String url = String(SERVER_URL) + (USE_CALIBRATION_PATTERN ? "/v1/test.bin" : "/v1/frame.bin?" FRAME_QUERY);
   bool tls = url.startsWith("https://");
   NetworkClientSecure secure;
@@ -1189,7 +1659,7 @@ FetchResult fetch_frame(const char* etag, uint8_t* buf) {
   if (tls) secure.setCACert(CA_BUNDLE_PEM);
 
   HTTPClient http;
-  http.useHTTP10(true);  // no chunked encoding: the body is exactly the frame
+  http.useHTTP10(true);  // no chunked encoding: a plain body of Content-Length bytes, or until close
   http.setConnectTimeout(10000);
   http.setTimeout(20000);
   http.setUserAgent("inkboard/1.0");
@@ -1201,7 +1671,8 @@ FetchResult fetch_frame(const char* etag, uint8_t* buf) {
   r.http_status = http.GET();
   int32_t body = 0;
   if (r.http_status == 200) {
-    body = read_body(http.getStreamPtr(), buf, wake::FRAME_BYTES, 20000);
+    body = body::read_exact(*http.getStreamPtr(), buf, wake::FRAME_BYTES, http.getSize(), 20000,
+                            [] { return static_cast<uint32_t>(millis()); }, [] { delay(5); });
     String tag = http.header("ETag");
     if (tag.length() < sizeof(r.etag)) strncpy(r.etag, tag.c_str(), sizeof(r.etag) - 1);
   } else if (r.http_status == 400) {
@@ -1213,7 +1684,6 @@ FetchResult fetch_frame(const char* etag, uint8_t* buf) {
   r.date_epoch = httptime::parse_http_date(http.header("Date").c_str());
   r.retry_after_s = wake::parse_seconds(http.header("Retry-After").c_str());
   http.end();
-
   // A 200 without an ETag is still drawn; its empty tag means the next wake sends no If-None-Match.
   r.outcome = wake::classify(r.http_status, body);
   return r;
@@ -1225,30 +1695,45 @@ FetchResult fetch_frame(const char* etag, uint8_t* buf) {
 `src/main.cpp`:
 ```cpp
 // inkboard thin client (spec §6): wake, fetch the frame, draw it if it changed, sleep.
-// All decisions live in include/wake_logic.h (host-tested); this file only wires hardware.
+// The cycle and all decisions live in include/cycle.h and wake_logic.h (host-tested);
+// this file only supplies the hardware operations.
 #include <Arduino.h>
 #include <driver/gpio.h>
 #include <esp_sleep.h>
 #include <soc/soc_caps.h>
 
-#include "badge.h"
 #include "config.h"
+#include "cycle.h"
 #include "fetch.h"
 #include "frame_store.h"
-#include "http_time.h"
 #include "panel.h"
 #include "pins.h"
-#include "wake_logic.h"
 
-static constexpr uint32_t kMagic = 0x1B0A4D01;
-
-// Survives deep sleep; reset on power loss (then kMagic doesn't match).
-RTC_DATA_ATTR static uint32_t g_magic;
-RTC_DATA_ATTR static wake::State g_state;
-RTC_DATA_ATTR static int64_t g_last_ok_epoch;
-RTC_DATA_ATTR static int32_t g_utc_offset_s;
-
+RTC_DATA_ATTR static wake::Rtc g_rtc;  // survives deep sleep; magic mismatch = cold boot
 static uint8_t g_frame[wake::FRAME_BYTES];
+
+struct BoardOps {
+  bool fs;
+  bool store_ok() { return fs; }
+  void load_etag(char* out, size_t n) { store_load_etag(out, n); }
+  bool has_frame() { return store_has_frame(); }
+  bool load_frame(uint8_t* buf) { return store_load_frame(buf); }
+  bool save(const uint8_t* buf, const char* etag) {
+    bool ok = store_save(buf, etag);
+    if (!ok) Serial.println("store_save failed");
+    return ok;
+  }
+  void clear_etag() { store_clear_etag(); }
+  wake::Fetched fetch(const char* etag, uint8_t* buf) {
+    wake::Fetched r;
+    if (wifi_connect(15000)) r = fetch_frame(etag, buf);
+    wifi_off();  // before drawing: the refresh takes seconds
+    Serial.printf("GET -> %d (sent etag: %s)\n", r.http_status, etag[0] ? etag : "none");
+    return r;
+  }
+  void show(const uint8_t* frame) { panel_show(frame); }
+  void show_error(const char* message) { panel_show_error(message, FRAME_QUERY); }
+};
 
 static void deep_sleep(int32_t seconds) {
   Serial.printf("sleeping %ld s\n", static_cast<long>(seconds));
@@ -1272,56 +1757,8 @@ void setup() {
   delay(30);
   digitalWrite(PIN_LED_STATUS, HIGH);
 
-  if (g_magic != kMagic) {  // cold boot
-    g_magic = kMagic;
-    g_state = wake::State{0, false, false};
-    g_last_ok_epoch = 0;
-    g_utc_offset_s = 0;
-  }
-
-  bool fs_ok = store_begin();
-  char etag[40] = "";
-  if (fs_ok) store_load_etag(etag, sizeof etag);
-
-  FetchResult r;
-  if (wifi_connect(15000)) r = fetch_frame(etag, g_frame);
-  wifi_off();
-  Serial.printf("GET -> %d (etag sent: %s)\n", r.http_status, etag[0] ? etag : "none");
-
-  bool stored = fs_ok && store_has_frame();
-  wake::Plan plan = wake::decide(r.outcome, g_state, stored);
-
-  if (r.outcome == wake::Outcome::Frame200 || r.outcome == wake::Outcome::NotModified304) {
-    if (r.date_epoch > 0) g_last_ok_epoch = r.date_epoch;
-    if (r.utc_offset_s != INT32_MIN) g_utc_offset_s = r.utc_offset_s;
-  }
-  if (plan.save_frame && fs_ok && !store_save(g_frame, r.etag)) Serial.println("store_save failed");
-  if (plan.clear_etag && fs_ok) store_clear_etag();
-
-  switch (plan.draw) {
-    case wake::Draw::NewFrame:
-      panel_show(g_frame);
-      break;
-    case wake::Draw::StoredFrame:
-      if (store_load_frame(g_frame)) panel_show(g_frame);
-      break;
-    case wake::Draw::StoredFrameWithBadge:
-      if (store_load_frame(g_frame)) {
-        char text[32];
-        httptime::badge_text(text, sizeof text, g_last_ok_epoch, g_utc_offset_s);
-        badge::draw_badge(g_frame, text);
-        panel_show(g_frame);
-      }
-      break;
-    case wake::Draw::ErrorScreen:
-      panel_show_error(r.message, FRAME_QUERY);
-      break;
-    case wake::Draw::Nothing:
-      break;
-  }
-
-  g_state = plan.next;
-  deep_sleep(wake::sleep_for(r.outcome, g_state.fail_count, r.next_refresh_s, r.retry_after_s, FALLBACK_SLEEP_S));
+  BoardOps ops{store_begin()};
+  deep_sleep(wake::run_cycle(ops, g_rtc, g_frame, FALLBACK_SLEEP_S));
 }
 
 void loop() {}  // never reached: setup() ends in deep sleep
@@ -1339,7 +1776,7 @@ Expected: `[SUCCESS]`, with RAM usage printed (it should be under 40%: the 48 KB
 the 6 KB page buffer).
 
 Run: `pio test -e native 2>&1 | tail -3`
-Expected: `23 Tests 0 Failures 0 Ignored` (nothing regressed).
+Expected: `37 Tests 0 Failures 0 Ignored` (nothing regressed).
 
 In `README.md`, change the roadmap line `- [ ] Deep-sleep update cycle + battery voltage` to
 `- [x] Deep-sleep update cycle (battery voltage still to do)`.
@@ -1357,7 +1794,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 6: Hardware bring-up (with your human partner at the board)
+### Task 8: Hardware bring-up (with your human partner at the board)
 
 **Files:**
 - Create: `docs/dashboard-bringup.md`
@@ -1412,7 +1849,8 @@ Stop the server (`just down`, or stop the dev server) and let the board wake thr
   and after three more failures the badge is drawn over it again. Its time now says just
   "offline", because RTC memory was lost.
 Restart the server, then press RESET: the next wake gets a 304 and redraws the clean frame
-without the badge.
+without the badge. Repeat once with a power cut while the badge is showing, restarting the
+server right away: the first wake after power-up also redraws the clean frame.
 
 ## 5. Config error
 Set `FRAME_QUERY` to `"w=market_trends:2/3"` and run `just flash`. The error screen shows
