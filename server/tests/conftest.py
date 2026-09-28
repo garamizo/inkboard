@@ -31,3 +31,22 @@ def golden(request):
             pytest.fail(f"{name} differs from its golden; wrote {actual.name}")
 
     return check
+
+
+from datetime import datetime, timedelta, timezone
+
+
+class FakeClock:
+    def __init__(self, t: datetime):
+        self.t = t
+
+    def __call__(self) -> datetime:
+        return self.t
+
+    def advance(self, **kw) -> None:
+        self.t += timedelta(**kw)
+
+
+@pytest.fixture
+def clock():
+    return FakeClock(datetime(2026, 9, 27, 17, 0, tzinfo=timezone.utc))
