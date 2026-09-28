@@ -1,6 +1,9 @@
 #include <unity.h>
 
 #include "wake_logic.h"
+#include <string.h>
+
+#include "http_time.h"
 
 using namespace wake;
 
@@ -152,6 +155,40 @@ void test_sleep_for() {
   TEST_ASSERT_EQUAL_INT32(900, sleep_for(Outcome::Failure, 2, -1, -1, 3600));
 }
 
+void test_parse_http_date() {
+  TEST_ASSERT_TRUE(httptime::parse_http_date("Sun, 27 Sep 2026 19:39:05 GMT") == 1790537945LL);
+  TEST_ASSERT_TRUE(httptime::parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT") == 0LL);
+  TEST_ASSERT_TRUE(httptime::parse_http_date("Tue, 29 Feb 2028 12:00:00 GMT") == 1835438400LL);
+  TEST_ASSERT_TRUE(httptime::parse_http_date("garbage") == -1);
+  TEST_ASSERT_TRUE(httptime::parse_http_date("") == -1);
+  TEST_ASSERT_TRUE(httptime::parse_http_date(nullptr) == -1);
+  TEST_ASSERT_TRUE(httptime::parse_http_date("Sun, 27 Foo 2026 19:39:05 GMT") == -1);
+}
+
+void test_format_clock() {
+  char out[9];
+  httptime::format_clock(1790537945LL, -25200, out);   // 19:39 UTC-7 -> 12:39 PM
+  TEST_ASSERT_EQUAL_STRING("12:39 PM", out);
+  httptime::format_clock(1790537945LL, 0, out);
+  TEST_ASSERT_EQUAL_STRING("7:39 PM", out);
+  httptime::format_clock(1790537945LL - 19 * 3600 - 39 * 60 - 5, 0, out);   // midnight
+  TEST_ASSERT_EQUAL_STRING("12:00 AM", out);
+  httptime::format_clock(1790537945LL, 5 * 3600 + 1800, out);   // +5:30
+  TEST_ASSERT_EQUAL_STRING("1:09 AM", out);
+}
+
+void test_badge_text_with_time() {
+  char out[32];
+  httptime::badge_text(out, sizeof out, 1790537945LL, -25200);
+  TEST_ASSERT_EQUAL_STRING("offline since 12:39 PM", out);
+}
+
+void test_badge_text_without_time() {
+  char out[32];
+  httptime::badge_text(out, sizeof out, 0, -25200);
+  TEST_ASSERT_EQUAL_STRING("offline", out);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_classify_200_needs_exact_length);
@@ -170,5 +207,9 @@ int main(int, char**) {
   RUN_TEST(test_cold_boot_304_restores_clean_frame);
   RUN_TEST(test_cold_boot_still_badges_after_three_failures);
   RUN_TEST(test_sleep_for);
+  RUN_TEST(test_parse_http_date);
+  RUN_TEST(test_format_clock);
+  RUN_TEST(test_badge_text_with_time);
+  RUN_TEST(test_badge_text_without_time);
   return UNITY_END();
 }
