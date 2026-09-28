@@ -7,7 +7,6 @@ results in the table at the end.
 - `include/secrets.h` has your Wi-Fi credentials (copy it from `include/secrets.h.example`).
 - A server is reachable. Pick one:
   - **Production:** `just check` shows the public URL working. Flash with `just flash`.
-
   - **Dev server on the LAN:** run `just dev` on this machine and flash with
     `just flash-dev`, which points the firmware at `http://<this machine's LAN IP>:8765`.
     You don't need to deploy anything or set up the tunnel for this.
