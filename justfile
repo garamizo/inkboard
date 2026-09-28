@@ -46,8 +46,11 @@ check:
     mkdir -p server/.cache
     curl -s -o server/.cache/preview.png -D - --max-time 25 "{{public_url}}/v1/frame.png?{{query}}" \
       | grep -iE '^(HTTP|cf-cache-status|etag|x-next-refresh-seconds)' || echo "public: no response"
-    [[ -s server/.cache/preview.png ]] && file -b server/.cache/preview.png | grep -q PNG \
-      && { echo "frame: server/.cache/preview.png"; xdg-open server/.cache/preview.png >/dev/null 2>&1 & }
+    if file -b server/.cache/preview.png 2>/dev/null | grep -q PNG; then
+      echo "frame: server/.cache/preview.png"; xdg-open server/.cache/preview.png >/dev/null 2>&1 &
+    else
+      echo "frame: not available"
+    fi
 
 # Flash firmware and open the serial monitor; ENV: supermini-c6 (default), minimal, ...
 flash ENV="supermini-c6":
