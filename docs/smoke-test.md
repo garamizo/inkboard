@@ -15,6 +15,9 @@ assemble the case, while the wires are still easy to reach.
    pio run -e smoke -t upload -t monitor
    ```
 
+   `just flash-dev smoke` does the same, but points the network check at this machine's
+   `just dev` server, and waits for a sleeping board to wake before uploading.
+
    If the upload can't connect, hold **BOOT**, tap **RESET**, release **BOOT**, and retry.
    After a manual bootloader entry, tap RESET once more after flashing to start the firmware.
 

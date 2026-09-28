@@ -8,10 +8,14 @@
 //      then a soak test that runs until reset: a status line updated with a
 //      partial refresh every second, and the whole pattern redrawn with a
 //      full refresh every minute
+//   5. Network: joins Wi-Fi with include/secrets.h and fetches SERVER_URL/v1/test.bin
+//      (`just flash-dev smoke` points SERVER_URL at this machine's dev server)
 // Press BOOT to run the wiring check and display test again.
 
 #include <Arduino.h>
 #include <algorithm>
+#include <HTTPClient.h>
+#include <NetworkClientSecure.h>
 #include <SPI.h>
 #include <WiFi.h>
 #include <esp_mac.h>
@@ -19,7 +23,12 @@
 #include <Fonts/FreeSansBold18pt7b.h>
 #include <Fonts/FreeSans9pt7b.h>
 
+#include "ca_certs.h"
+#include "config.h"
 #include "pins.h"
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
 
 // Waveshare 7.5" V2 (800x480, UC8179 controller) = GxEPD2_750_T7.
 // A full-height frame buffer is 48 KB, which the C6 has room for.
@@ -94,6 +103,58 @@ static void checkWifi() {
   }
   WiFi.scanDelete();
   WiFi.mode(WIFI_OFF);
+}
+
+// Joins Wi-Fi with the dashboard's credentials and fetches the calibration frame from the
+// same server the dashboard firmware uses: separates Wi-Fi, LAN/firewall and TLS problems.
+static void checkNetwork() {
+  banner("Network");
+#ifndef WIFI_SSID
+  Serial.println("SKIP: no include/secrets.h (copy include/secrets.h.example)");
+#else
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) delay(100);
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.printf("FAIL: Wi-Fi \"%s\" not joined after 15 s (status %d)\n", WIFI_SSID,
+                  static_cast<int>(WiFi.status()));
+    WiFi.mode(WIFI_OFF);
+    return;
+  }
+  Serial.printf("PASS: Wi-Fi joined in %lu ms, ip %s, gateway %s, %d dBm\n", millis() - start,
+                WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(), WiFi.RSSI());
+
+  String url = String(SERVER_URL) + "/v1/test.bin";
+  bool tls = url.startsWith("https://");
+  NetworkClientSecure secure;
+  NetworkClient plain;
+  if (tls) {
+    secure.setCACert(CA_BUNDLE_PEM);
+    secure.setHandshakeTimeout(10);
+  }
+  HTTPClient http;
+  http.setConnectTimeout(8000);
+  http.setTimeout(10000);
+  Serial.printf("GET %s\n", url.c_str());
+  start = millis();
+  if (!http.begin(tls ? static_cast<NetworkClient&>(secure) : plain, url)) {
+    Serial.println("FAIL: bad SERVER_URL");
+  } else {
+    int code = http.GET();
+    if (code < 0) {
+      Serial.printf("FAIL: %s after %lu ms (server down, firewall, or router isolating Wi-Fi clients)\n",
+                    HTTPClient::errorToString(code).c_str(), millis() - start);
+    } else {
+      int size = http.getSize();
+      Serial.printf("%s: HTTP %d, %d bytes in %lu ms\n", code == 200 && size == 48000 ? "PASS" : "WARN",
+                    code, size, millis() - start);
+    }
+    http.end();
+  }
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+#endif
 }
 
 enum class LineState { DrivenHigh, DrivenLow, Floating };
@@ -448,6 +509,9 @@ void setup() {
   pinMode(PIN_EPD_PWR, OUTPUT);
   digitalWrite(PIN_EPD_PWR, HIGH);
   pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
+  delay(5);
+  Serial.printf("BOOT button (GPIO9): %s\n",
+                digitalRead(PIN_BOOT_BTN) ? "released" : "PRESSED or held low (resets will enter download mode)");
 
   // GxEPD2 writes CS/DC/RST before configuring them, which Arduino-ESP32 3.x
   // logs as an error; configure them first.
@@ -462,6 +526,7 @@ void setup() {
 
   checkMcu();
   checkWifi();
+  checkNetwork();
   runPanelChecks();
 }
 
