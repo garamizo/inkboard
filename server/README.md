@@ -8,6 +8,7 @@ query string; the server keeps no per-device state. Design: `../docs/superpowers
     uv sync
     uv run pytest                     # all tests, no network
     uv run pytest --update-goldens    # after an intended visual change; review the PNG diffs
+    uv run python tests/fixtures/record_fixtures.py   # re-record upstream fixtures (network)
     FRED_API_KEY=... uv run uvicorn inkboard_server.main:app --reload --port 8765
 
 Preview in a browser:
