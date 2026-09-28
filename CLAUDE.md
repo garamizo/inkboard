@@ -42,12 +42,13 @@ code comments refer to it).
   `PLATFORMIO_UPLOAD_PORT`) wipes the build folder.** `flash-dev` passes the port with `-p` for
   this reason.
 - **The board's USB port only exists while it is awake.** It deep-sleeps unless a computer is
-  on USB (checked at each wake). To flash a sleeping board: press RESET, or hold BOOT + tap
-  RESET.
+  on USB (checked at each wake). To flash a sleeping board: tap RESET (not BOOT), then flash.
 - **Stuck in the USB downloader:** serial shows `rst:0x15 (USB_UART_HPSYS),boot:0x0
-  (USB_BOOT) … wait usb download` after every reset, and USB-side resets don't clear it. Only a
-  power cycle does (with the LiPo attached: unplug battery and USB). See
-  `docs/smoke-test.md` → Troubleshooting.
+  (USB_BOOT) … wait usb download` after every reset. The C6 latches its strap pins (BOOT =
+  GPIO9) only on a chip reset (RESET button or power-on); USB resets, including esptool's
+  hard reset, reuse the latched value. So after a BOOT + RESET entry every USB reset returns
+  to the downloader. Tapping RESET fixes it; no need to unplug the battery. Verified: the
+  strap register `GPIO_STRAP_REG` (0x60091038) reads 0x0 when stuck, 0x4 normally.
 
 ## Style
 

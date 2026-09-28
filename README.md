@@ -67,9 +67,8 @@ You need the assembled board ([docs/wiring.md](docs/wiring.md)), a USB-C data ca
    ```
 
    The first build downloads the toolchain (~1 GB into `~/.platformio`) and takes a few
-   minutes. If the upload can't connect, for example because the board is in deep sleep,
-   hold **BOOT**, tap **RESET**, release **BOOT** and run `just flash` again, then tap RESET
-   once more to start the firmware. More troubleshooting: [docs/smoke-test.md](docs/smoke-test.md).
+   minutes. If the upload can't connect, the board is probably in deep sleep: tap **RESET**
+   (not BOOT) and run `just flash` again. The board wakes, sees the computer and stays awake. More troubleshooting: [docs/smoke-test.md](docs/smoke-test.md).
 
 ### Server provider (Linux): API keys + deploy
 

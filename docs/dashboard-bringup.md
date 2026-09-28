@@ -17,11 +17,11 @@ results in the table at the end.
 - While a computer is on its USB, the board stays awake between updates, so `just flash`,
   `just flash-dev` and `just monitor` work any time. On battery or a charger it deep-sleeps,
   and its USB port is off. A computer plugged in during sleep is noticed at the next wake.
-  `just flash-dev` waits for that wake by itself. To skip the wait: hold BOOT, tap RESET,
-  release BOOT, then press RESET after the upload.
+  `just flash-dev` waits for that wake by itself. To skip the wait, tap RESET (not BOOT): the
+  board wakes at once and stays awake for the upload.
 - If uploads succeed but the board never starts the firmware (serial shows only
-  `wait usb download`), it's stuck in the USB downloader: disconnect the battery **and** USB,
-  then reconnect. See the troubleshooting table in `docs/smoke-test.md`.
+  `wait usb download`), it's stuck in the USB downloader: tap RESET. See the troubleshooting
+  table in `docs/smoke-test.md`.
 - RESET (or a re-flash) keeps the board's wake state, so it behaves like an early timer wake.
   Unplugging the power clears that state: the first successful wake after power-up redraws
   the stored frame once, because the board can't know what the panel shows.

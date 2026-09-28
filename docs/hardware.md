@@ -28,7 +28,9 @@ A thumb-sized clone board built around Espressif's ESP32-C6.
 | Power | USB-C 5 V → 3.3 V regulator; LiPo charger feeding the B+/B- pads |
 
 **BOOT and RESET:** if an upload fails to connect, hold BOOT, tap RESET, and release BOOT. The
-chip then stays in the ROM bootloader until the next reset.
+chip then stays in the ROM bootloader until the next RESET press or power cycle: the strap
+pins are latched only on a chip reset, so esptool's USB reset after the upload doesn't leave
+the bootloader. Tap RESET after flashing.
 
 ## Waveshare e-Paper Driver HAT (rev 2.3)
 

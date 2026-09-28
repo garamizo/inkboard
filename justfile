@@ -134,7 +134,7 @@ flash-dev ENV="supermini-c6":
     pio run -e {{ENV}}
     # The board's USB port only exists while it is awake (a few seconds per wake). Wait for
     # it, then upload at once: esptool resets the chip into the bootloader over USB itself.
-    echo "waiting for the board to wake (up to 7 min; or hold BOOT, tap RESET, release BOOT)..."
+    echo "waiting for the board to wake (up to 7 min; or tap RESET to wake it now)..."
     for _ in $(seq 1 2100); do
       port=$(ls /dev/ttyACM* 2>/dev/null | head -1 || true)
       [[ -n "$port" ]] && break

@@ -19,8 +19,9 @@ assemble the case, while the wires are still easy to reach.
    `just flash-dev smoke` points the check at this machine's `just dev` server instead, and
    waits for a sleeping board to wake before uploading.
 
-   If the upload can't connect, hold **BOOT**, tap **RESET**, release **BOOT**, and retry.
-   After a manual bootloader entry, tap RESET once more after flashing to start the firmware.
+   If the upload can't connect, tap **RESET** and retry (a sleeping board wakes and stays
+   awake while a computer is on USB). If that still fails, hold **BOOT**, tap **RESET**,
+   release **BOOT** and retry; then tap RESET once more after flashing to start the firmware.
 
 If the full test misbehaves, `pio run -e minimal -t upload -t monitor` flashes a bare
 display check (`extras/minimal/`) that follows the kit's reference firmware. If that also
@@ -107,7 +108,7 @@ the wiring checks and restart the soak test.
 | No `/dev/ttyACM0` | Charge-only USB cable; try another cable or port. |
 | `Permission denied` on the port | You are not in the `dialout` group (see [toolchain.md](toolchain.md)). |
 | No serial output after flashing | Press RESET. The monitor attached after the first lines were printed. |
-| Upload succeeds but nothing runs; serial shows only `boot:0x0 (USB_BOOT)` … `wait usb download` after every reset | The chip is stuck in the USB downloader (seen after entering it with BOOT + RESET). Chip resets, esptool's RTS or watchdog reset included, don't clear it; only a **power cycle** does. With a LiPo attached, unplug **both** the battery and USB, then reconnect. |
+| Upload succeeds but nothing runs; serial shows only `boot:0x0 (USB_BOOT)` … `wait usb download` after every reset | The chip is stuck in the USB downloader after a BOOT + RESET entry. The C6 latches its strap pins (BOOT = GPIO9) only on a chip reset (RESET button or power-on). esptool's reset after the upload comes over USB and reuses the latched "BOOT held" value, so it lands in the downloader again. **Tap RESET** (without BOOT) to boot the firmware; unplugging the battery isn't needed. |
 | `nothing drives BUSY` (floating) | BUSY wire not on GPIO3, or the controller is unpowered: measure 3.3 V between HAT VCC and GND, check PWR → GPIO1, reseat the ribbon. |
 | `BUSY held LOW` / `still LOW` | Ribbon upside down (first row), RST → GPIO2 not connected, a solder bridge to GND, or wrong switch settings. |
 | `IO 20 is not set as GPIO` log errors | Harmless: GxEPD2 writes CS/DC/RST before configuring them. Current firmware configures them first. |
