@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "http_time.h"
+#include "badge.h"
 
 using namespace wake;
 
@@ -189,6 +190,69 @@ void test_badge_text_without_time() {
   TEST_ASSERT_EQUAL_STRING("offline", out);
 }
 
+static uint8_t g_frame[48000];
+
+static void white_frame() { memset(g_frame, 0xFF, sizeof g_frame); }
+
+void test_pixel_bit_layout() {
+  white_frame();
+  badge::set_px(g_frame, 0, 0, true);
+  TEST_ASSERT_EQUAL_HEX8(0x7F, g_frame[0]);          // MSB = leftmost, 0 = black
+  badge::set_px(g_frame, 9, 1, true);
+  TEST_ASSERT_EQUAL_HEX8(0xBF, g_frame[101]);        // row 1 starts at byte 100
+  TEST_ASSERT_TRUE(badge::is_black(g_frame, 9, 1));
+  badge::set_px(g_frame, 800, 0, true);              // out of range: ignored
+  badge::set_px(g_frame, -1, 5, true);
+  TEST_ASSERT_EQUAL_HEX8(0xFF, g_frame[99]);
+}
+
+void test_text_width() {
+  TEST_ASSERT_EQUAL_INT(11, badge::text_width("ab", 1));   // 2 x 6 px, minus trailing gap
+  TEST_ASSERT_EQUAL_INT(22, badge::text_width("ab", 2));
+  TEST_ASSERT_EQUAL_INT(0, badge::text_width("", 2));
+}
+
+void test_badge_box_bottom_right_and_contained() {
+  white_frame();
+  badge::Rect r = badge::draw_badge(g_frame, "offline since 12:39 PM");
+  TEST_ASSERT_TRUE(r.x + r.w <= 800 && r.y + r.h <= 480 && r.x > 400 && r.y > 440);
+  // Border is black on all four sides.
+  TEST_ASSERT_TRUE(badge::is_black(g_frame, r.x, r.y));
+  TEST_ASSERT_TRUE(badge::is_black(g_frame, r.x + r.w - 1, r.y + r.h - 1));
+  TEST_ASSERT_TRUE(badge::is_black(g_frame, r.x + r.w / 2, r.y));
+  // Text drew something inside; padding next to the border stays white.
+  int inside = 0;
+  for (int y = r.y + 2; y < r.y + r.h - 2; y++)
+    for (int x = r.x + 2; x < r.x + r.w - 2; x++) inside += badge::is_black(g_frame, x, y);
+  TEST_ASSERT_TRUE(inside > 100);
+  TEST_ASSERT_FALSE(badge::is_black(g_frame, r.x + 2, r.y + 2));
+  // Nothing outside the box changed.
+  int outside = 0;
+  for (int y = 0; y < 480; y++)
+    for (int x = 0; x < 800; x++)
+      if (x < r.x || x >= r.x + r.w || y < r.y || y >= r.y + r.h) outside += badge::is_black(g_frame, x, y);
+  TEST_ASSERT_EQUAL_INT(0, outside);
+}
+
+void test_badge_overwrites_dark_background() {
+  memset(g_frame, 0x00, sizeof g_frame);             // all black underneath
+  badge::Rect r = badge::draw_badge(g_frame, "offline");
+  TEST_ASSERT_FALSE(badge::is_black(g_frame, r.x + 2, r.y + 2));   // box interior cleared
+}
+
+void test_glyph_one() {
+  white_frame();
+  badge::draw_text(g_frame, 10, 10, "1", 1);
+  // '1' row 0 = 0x04: only column 2 is set.
+  TEST_ASSERT_FALSE(badge::is_black(g_frame, 11, 10));
+  TEST_ASSERT_TRUE(badge::is_black(g_frame, 12, 10));
+  TEST_ASSERT_FALSE(badge::is_black(g_frame, 13, 10));
+  // row 6 = 0x0E: columns 1..3.
+  TEST_ASSERT_TRUE(badge::is_black(g_frame, 11, 16));
+  TEST_ASSERT_TRUE(badge::is_black(g_frame, 13, 16));
+  TEST_ASSERT_FALSE(badge::is_black(g_frame, 14, 16));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_classify_200_needs_exact_length);
@@ -211,5 +275,10 @@ int main(int, char**) {
   RUN_TEST(test_format_clock);
   RUN_TEST(test_badge_text_with_time);
   RUN_TEST(test_badge_text_without_time);
+  RUN_TEST(test_pixel_bit_layout);
+  RUN_TEST(test_text_width);
+  RUN_TEST(test_badge_box_bottom_right_and_contained);
+  RUN_TEST(test_badge_overwrites_dark_background);
+  RUN_TEST(test_glyph_one);
   return UNITY_END();
 }
