@@ -37,8 +37,11 @@ checked on hardware. It is not part of this plan.
 - The threshold is 140 (`> 140` → white). No dithering.
 - The ETag is `"` + the first 16 hex characters of the sha256 of the frame bytes + `"`.
 - `X-Next-Refresh-Seconds` is always in 300–21600.
-- Rate limit: 30 requests per IP per hour on `/v1/frame.*`. Query length is at most
-  1024. At most 3 widgets and at most 4 series.
+- Rate limit: 30 requests per IP per hour on `/v1/frame.*`. The client IP comes from
+  the header in `INKBOARD_CLIENT_IP_HEADER` (`CF-Connecting-IP` in production), never from
+  `X-Forwarded-For`. Query length is at most 1024. At most 3 widgets and at most 4 series.
+- Public exposure goes through a Cloudflare Tunnel (`cloudflared` in the same compose
+  project). The server port is bound to `127.0.0.1` only. See `docs/cloudflare-tunnel.md`.
 - Cache TTLs: FRED 6 h; weather 30 min. Weather LRU cap 2,000 entries and a daily cap
   of 8,000 upstream calls. Frame cache 500 entries.
 - The weather cache key is `(lat rounded to 0.1, lon rounded to 0.1, units, tz)`.
@@ -1324,7 +1327,7 @@ FRED_TTL = timedelta(hours=6)
 WEATHER_TTL = timedelta(minutes=30)
 WEATHER_MAX_ENTRIES = 2000
 WEATHER_DAILY_CAP = 8000
-USER_AGENT = "inkboard-server (+https://inkboard.signalwave.app)"
+USER_AGENT = "inkboard-server (+https://inkboard.signalwave.dev)"
 
 
 class Sources:
@@ -3219,7 +3222,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces:
   - `RateLimiter(capacity=30, per_seconds=3600, clock=time.monotonic, max_keys=10000)`,
     with `.check(key) -> float | None` (None = allowed, otherwise the seconds to wait)
-  - `app.create_app(sources, *, clock=utcnow, limiter: RateLimiter | None = None, registry=None) -> FastAPI`
+  - `app.create_app(sources, *, clock=utcnow, limiter: RateLimiter | None = None, registry=None, client_ip_header: str | None = None) -> FastAPI`
   - `app.etag_matches(header: str | None, etag: str) -> bool`
   - `main.app` (the production ASGI app)
 
@@ -3406,6 +3409,15 @@ def test_rate_limit_429(sources, clock):
     assert c.get("/healthz").status_code == 200  # exempt
 
 
+def test_rate_limit_keys_on_client_ip_header(sources, clock):
+    c = TestClient(create_app(sources, clock=clock, limiter=RateLimiter(capacity=1),
+                              client_ip_header="CF-Connecting-IP"))
+    a, b = {"CF-Connecting-IP": "203.0.113.1"}, {"CF-Connecting-IP": "203.0.113.2"}
+    assert c.get(f"/v1/frame.bin?{DEFAULT_Q}", headers=a).status_code == 200
+    assert c.get(f"/v1/frame.bin?{DEFAULT_Q}", headers=a).status_code == 429
+    assert c.get(f"/v1/frame.bin?{DEFAULT_Q}", headers=b).status_code == 200  # different client
+
+
 def test_png_matches_bin(client):
     bits = client.get(f"/v1/frame.bin?{DEFAULT_Q}").content
     png = client.get(f"/v1/frame.png?{DEFAULT_Q}")
@@ -3517,7 +3529,7 @@ def _calibration() -> RenderedFrame:
 
 
 def create_app(sources, *, clock: Callable = utcnow, limiter: RateLimiter | None = None,
-               registry=None) -> FastAPI:
+               registry=None, client_ip_header: str | None = None) -> FastAPI:
     registry = REGISTRY if registry is None else registry
     limiter = limiter or RateLimiter()
     cache = FrameCache(FRAME_CACHE_SIZE)
@@ -3532,8 +3544,15 @@ def create_app(sources, *, clock: Callable = utcnow, limiter: RateLimiter | None
                  response.status_code, (time.perf_counter() - start) * 1000)
         return response
 
+    def client_key(request: Request) -> str:
+        # Behind the Cloudflare tunnel every socket peer is cloudflared; CF-Connecting-IP is
+        # set (overwritten) by Cloudflare, so it is the real client. Never X-Forwarded-For.
+        if client_ip_header and (value := request.headers.get(client_ip_header)):
+            return value.strip()
+        return request.client.host if request.client else "unknown"
+
     def rate_limited(request: Request) -> Response | None:
-        wait = limiter.check(request.client.host if request.client else "unknown")
+        wait = limiter.check(client_key(request))
         if wait is None:
             return None
         return PlainTextResponse("rate limited", status_code=429, headers={"Retry-After": str(math.ceil(wait))})
@@ -3643,7 +3662,8 @@ _key = os.environ.get("FRED_API_KEY", "")
 if not _key:
     logging.getLogger(__name__).warning("FRED_API_KEY is not set: market widgets will show 'No data yet'")
 
-app = create_app(build_sources(Path(os.environ.get("INKBOARD_CACHE_DIR", ".cache")), _key))
+app = create_app(build_sources(Path(os.environ.get("INKBOARD_CACHE_DIR", ".cache")), _key),
+                 client_ip_header=os.environ.get("INKBOARD_CLIENT_IP_HEADER") or None)
 ```
 
 - [ ] **Step 6: Generate the API golden, inspect it, run all tests**
@@ -3705,14 +3725,13 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY inkboard_server ./inkboard_server
 RUN uv sync --frozen --no-dev
-ENV INKBOARD_CACHE_DIR=/cache \
-    FORWARDED_ALLOW_IPS=127.0.0.1
+ENV INKBOARD_CACHE_DIR=/cache
 RUN mkdir -p /cache && chown nobody /cache
 VOLUME /cache
 EXPOSE 8000
 USER nobody
 CMD ["/app/.venv/bin/uvicorn", "inkboard_server.main:app", "--host", "0.0.0.0", "--port", "8000", \
-     "--proxy-headers", "--no-access-log"]
+     "--no-access-log", "--no-proxy-headers"]
 ```
 If the `ghcr.io/astral-sh/uv:0.11.14` tag doesn't exist, use `ghcr.io/astral-sh/uv:0.11`.
 
@@ -3724,27 +3743,56 @@ tests
 **/__pycache__
 ```
 
-`server/compose.yaml`:
+`server/compose.yaml` (the same tunnel pattern as `~/finance-ai`; see `docs/cloudflare-tunnel.md`):
 ```yaml
+# inkboard render server at inkboard.signalwave.dev. The tunnel's public hostname points at the
+# Docker service name http://inkboard:8000, which only resolves on this Compose network. Do not
+# also run cloudflared for this tunnel as a host service: two connectors split the traffic.
+name: inkboard
+
 services:
   inkboard:
     build: .
     restart: unless-stopped
-    env_file: .env
     environment:
-      # IP of the reverse proxy in front of this container; uvicorn trusts its X-Forwarded-For
-      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Cloudflare overwrites this header with the real client IP; the port below is
+      # loopback-only, so it cannot be spoofed from outside the tunnel.
+      INKBOARD_CLIENT_IP_HEADER: CF-Connecting-IP
     ports:
-      - "127.0.0.1:8090:8000"
+      - "127.0.0.1:8090:8000"   # local checks only
     volumes:
       - cache:/cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env}
+    depends_on:
+      inkboard:
+        condition: service_healthy
+
 volumes:
   cache:
 ```
 
+The healthcheck runs `python` inside the image. `python:3.12-slim` has it on the PATH.
+
 `server/.env.example`:
 ```
-FRED_API_KEY=your-fred-api-key   # free: https://fredaccount.stlouisfed.org/apikeys
+# Free key: https://fredaccount.stlouisfed.org/apikeys
+FRED_API_KEY=
+# Zero Trust -> Networks -> Tunnels -> inkboard: the token after --token in the install command.
+CLOUDFLARE_TUNNEL_TOKEN=
 LOG_LEVEL=INFO
 ```
 Add a line `.env` to `server/.gitignore`.
@@ -3768,12 +3816,14 @@ http://127.0.0.1:8765/v1/frame.png?w=market_trends:2/3,calendar_weather:1/3&lat=
 
 ## Deploy
 
-    cp .env.example .env              # set FRED_API_KEY
+    cp .env.example .env              # set FRED_API_KEY and CLOUDFLARE_TUNNEL_TOKEN
     docker compose up -d --build
+    docker compose logs -f cloudflared   # "Registered tunnel connection"
 
-The container listens on 127.0.0.1:8090. Put a TLS reverse proxy in front of it for
-inkboard.signalwave.app and set FORWARDED_ALLOW_IPS to the proxy's address so the per-IP
-rate limit sees real client IPs. The cache lives in the `cache` volume.
+Public traffic arrives through the Cloudflare Tunnel (`cloudflared` service); the server
+itself is only published on 127.0.0.1:8090 for local checks. One-time Cloudflare setup,
+cache and bot settings, and checks: `../docs/cloudflare-tunnel.md`. The cache lives in the
+`cache` volume.
 
 ## Endpoints
 
@@ -3806,8 +3856,10 @@ curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:8091/v1/test.png"
 curl -s "http://127.0.0.1:8091/healthz"
 docker stop inkboard-smoke
 ```
-Before `docker compose build`, create a `.env` with an empty key:
-`printf 'FRED_API_KEY=\n' > .env`
+Before `docker compose build`, create a `.env` with empty values:
+`printf 'FRED_API_KEY=\nCLOUDFLARE_TUNNEL_TOKEN=\n' > .env`. The `run` command starts only
+the `inkboard` service, so the empty tunnel token doesn't matter here. `docker compose up`
+would refuse to start without it, by design.
 
 Expected: `200`, then health JSON. Port 8091 is used for this smoke test so it can't
 collide with a long-running compose instance on 8090, or with ERPNext on 8080.

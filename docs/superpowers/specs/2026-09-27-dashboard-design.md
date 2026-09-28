@@ -12,7 +12,7 @@ shared spot such as a kitchen or hallway. The first screen shows:
   mortgage rate and the S&P 500 on one chart, each normalized to its own 5-year average.
 - **Calendar + weather** (1/3 width): the date, a month grid, and Los Angeles weather.
 
-One public server, `inkboard.signalwave.app`, serves any number of boards. Each board
+One public server, `inkboard.signalwave.dev`, serves any number of boards. Each board
 chooses its own widgets, sizes, location and series in its request.
 
 ![Reference mockup: Markets B (2/3) + Calendar B (1/3)](assets/2026-09-27-dashboard-mockup.png)
@@ -28,7 +28,7 @@ markers on the market lines were added after this image was saved (see §5.1).
 | Rendering | **On the server.** Python + Pillow draws a 1-bit 800×480 frame. The device only downloads and displays it (TRMNL-style thin client). |
 | Layout unit | Full-height **columns** of 1/3 (266 px), 2/3 (534 px) or full (800 px) width. No horizontal bands. |
 | Widget selection | **By the client.** Each board sends its layout and options in the query string. The server keeps no per-device state. |
-| Exposure | **Public, open service** at `inkboard.signalwave.app` on a cloud host. No accounts. Limited per IP. |
+| Exposure | **Public, open service** at `inkboard.signalwave.dev` on a cloud host. No accounts. Limited per IP. |
 | Market data | All from **FRED**: `SP500`, `CBBTCUSD` (Coinbase), `MORTGAGE30US`, `MEDLISPRI31080` (Realtor.com median listing price, Los Angeles CBSA). Series are selectable per board. |
 | Weather | **Open-Meteo** (no key), per board location. Default is Los Angeles. |
 | Calendar | Date and month grid only. No private calendar feeds. |
@@ -38,7 +38,7 @@ markers on the market lines were added after this image was saved (see §5.1).
 ## 1. Architecture
 
 ```
- ┌──────────── inkboard.signalwave.app (Docker, cloud host) ─────────────┐        ┌──── ESP32-C6 ─────┐
+ ┌──────────── inkboard.signalwave.dev (Docker, cloud host) ─────────────┐        ┌──── ESP32-C6 ─────┐
  │ sources/   FRED · Open-Meteo            (disk cache, TTL, stale flag) │        │ wake (RTC timer)  │
  │    ↓                                                                  │        │ Wi-Fi connect     │
  │ widgets/   MarketTrends · CalendarWeather       ← query string        │ ◀────  │ GET /v1/frame.bin │
@@ -235,11 +235,18 @@ class Widget(ABC):
   string, but not IP addresses beyond what the rate limiter keeps in memory.
 - **The query parser bounds everything:** at most 3 widgets, at most 4 series, numeric
   ranges enforced, and URLs longer than 1 KB rejected.
-- **TLS** terminates at the cloud host's proxy (or Caddy). The container listens on HTTP
-  on an internal port.
-- **Deployment:** one container plus a cache volume. Secrets (`FRED_API_KEY`) come in as
-  environment variables. The exact hosting provider's setup is a deployment detail
-  outside this spec.
+- **Publishing:** a Cloudflare Tunnel, the same pattern as `~/finance-ai` and
+  `~/chug-a-lug`. A `cloudflared` container in the server's Compose project connects to
+  Cloudflare, and the tunnel's public hostname points at `http://inkboard:8000`.
+  - TLS terminates at Cloudflare's edge. No port is opened on the host, and there is no
+    Cloudflare Access in front, because boards can't log in.
+  - Setup and checks are in `docs/cloudflare-tunnel.md`.
+- **Client IP for the rate limit:** read from the header named in
+  `INKBOARD_CLIENT_IP_HEADER`, which is `CF-Connecting-IP` in production. Cloudflare
+  overwrites it, while `X-Forwarded-For` can be pre-filled by clients. It falls back to
+  the socket address when the variable is unset (local runs).
+- **Deployment:** a server container plus a `cloudflared` container, with a cache volume.
+  Secrets (`FRED_API_KEY`, `CLOUDFLARE_TUNNEL_TOKEN`) come from `server/.env`.
 
 ### 3.6 Next-refresh schedule
 
@@ -372,12 +379,14 @@ visual style:
 - The current smoke test moves to `extras/smoke/`, with a new `[env:smoke]` following the
   existing `[env:minimal]` pattern. The README quick start is updated to match.
 - `include/config.h` (tracked) holds:
-  - `SERVER_URL` (`https://inkboard.signalwave.app`),
+  - `SERVER_URL` (`https://inkboard.signalwave.dev`),
   - `FRAME_QUERY` (default: `w=market_trends:2/3,calendar_weather:1/3&lat=34.05&lon=-118.24&tz=America/Los_Angeles&units=imperial`),
   - `FALLBACK_SLEEP_S` (3600).
 - `include/secrets.h` (already gitignored) holds `WIFI_SSID` and `WIFI_PASSWORD`.
   `secrets.h.example` is committed.
-- The Let's Encrypt ISRG Root X1 certificate is embedded for TLS.
+- TLS trusts a small CA bundle: ISRG Root X1 and X2, GTS Root R1 and R4. This is not one
+  pinned root, because Cloudflare's Universal SSL certificate can come from Let's Encrypt
+  or Google Trust Services and switch between them at renewal.
 - **Last-good frame store:** LittleFS on the existing `spiffs` data partition of
   `min_spiffs.csv` holds `/frame.bin` (48,000 bytes) and `/etag.txt`.
   - It is written only after a 200, and only when the ETag changed: at most about 24
@@ -518,7 +527,8 @@ force a redundant refresh.
   controller's memory, so partial refresh isn't possible.
 - Commercial use. The service is free and non-commercial because of the Open-Meteo and
   S&P DJI terms. If that changes, revisit those terms.
-- Choosing and configuring the cloud host and domain DNS (the user's task).
+- Choosing the machine that runs the stack. The Cloudflare side is documented in
+  `docs/cloudflare-tunnel.md`.
 
 ## 9. Risks and open points
 
