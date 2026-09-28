@@ -97,3 +97,11 @@ def test_month_grid_highlights_today():
     cw, ch = 266 / 7, 22
     cx, cy = int(cw / 2), int(ch * 5 + ch / 2 + 2)
     assert img.getpixel((cx - 12, cy)) < 128  # inverted cell background is black
+
+
+def test_drawer_renders_text_without_grey():
+    from inkboard_server.draw.canvas import drawer
+    from inkboard_server.draw.fonts import font
+    img = Image.new("L", (80, 20), 255)
+    drawer(img).text((2, 2), "$84.6k", font=font(13), fill=0)
+    assert sum(img.histogram()[1:255]) == 0  # no grey pixels to threshold away

@@ -98,3 +98,18 @@ def upstream():
 def sources(tmp_path, upstream, clock):
     return make_sources(upstream.fred, upstream.weather, cache_dir=tmp_path, clock=clock,
                         executor=InlineExecutor())  # deterministic: refreshes finish inside get()
+
+
+from inkboard_server.frame import THRESHOLD
+from inkboard_server.widgets.base import WIDGET_H, Box, RenderContext
+
+
+def render_widget(widget, data, ctx):
+    img = Image.new("L", (widget.size.width, WIDGET_H), 255)
+    widget.render(img, Box(0, 0, widget.size.width, WIDGET_H), data, ctx)
+    return img.point(lambda p: 255 if p > THRESHOLD else 0).convert("1")
+
+
+@pytest.fixture
+def ctx():
+    return RenderContext(FIXTURES_TODAY, LA)
