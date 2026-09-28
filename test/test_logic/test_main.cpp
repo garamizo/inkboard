@@ -5,6 +5,7 @@
 
 #include "http_time.h"
 #include "badge.h"
+#include "body_reader.h"
 
 using namespace wake;
 
@@ -253,6 +254,97 @@ void test_glyph_one() {
   TEST_ASSERT_FALSE(badge::is_black(g_frame, 14, 16));
 }
 
+// A stream whose bytes arrive at simulated times; the reader's idle() advances the clock.
+static uint32_t g_now;
+
+struct FakeStream {
+  struct Chunk { uint32_t at; int32_t len; };
+  Chunk chunks[4];
+  int n = 0;
+  uint32_t close_at = 0xFFFFFFFFu;  // never, unless set
+  int32_t consumed = 0;
+  void add(uint32_t at, int32_t len) { chunks[n++] = Chunk{at, len}; }
+  int32_t arrived() const {
+    int32_t a = 0;
+    for (int i = 0; i < n; i++)
+      if (chunks[i].at <= g_now) a += chunks[i].len;
+    return a;
+  }
+  int available() { return static_cast<int>(arrived() - consumed); }
+  int read(uint8_t* buf, size_t want) {
+    int32_t k = static_cast<int32_t>(want) < available() ? static_cast<int32_t>(want) : available();
+    for (int32_t i = 0; i < k; i++) buf[i] = static_cast<uint8_t>(consumed + i);
+    consumed += k;
+    return static_cast<int>(k);
+  }
+  bool connected() { return g_now < close_at || available() > 0; }
+};
+
+static uint8_t g_body[48000];
+
+static int32_t read_body(FakeStream& s, int32_t content_length, uint32_t timeout_ms = 20000) {
+  g_now = 0;
+  return body::read_exact(s, g_body, 48000, content_length, timeout_ms,
+                          [] { return g_now; }, [] { g_now += 5; });
+}
+
+void test_reader_declared_length_in_pieces() {
+  FakeStream s;
+  s.add(0, 20000);
+  s.add(300, 28000);
+  TEST_ASSERT_EQUAL_INT32(48000, read_body(s, 48000));
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(47999), g_body[47999]);
+}
+
+void test_reader_rejects_wrong_declared_length() {
+  FakeStream s;
+  s.add(0, 48001);
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(s, 48001));
+  TEST_ASSERT_EQUAL_INT32(0, s.consumed);            // didn't even start reading
+}
+
+void test_reader_close_delimited_exact() {
+  FakeStream s;
+  s.add(0, 48000);
+  s.close_at = 50;
+  TEST_ASSERT_EQUAL_INT32(48000, read_body(s, -1));
+}
+
+void test_reader_rejects_delayed_trailing_bytes() {
+  FakeStream s;
+  s.add(0, 48000);
+  s.add(500, 1);                                     // arrives after a pause
+  s.close_at = 1000;
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(s, -1));
+}
+
+void test_reader_rejects_truncated_body() {
+  FakeStream a;
+  a.add(0, 47000);
+  a.close_at = 100;
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(a, -1));
+  FakeStream b;
+  b.add(0, 47000);
+  b.close_at = 100;
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(b, 48000));
+}
+
+void test_reader_times_out_when_body_never_ends() {
+  FakeStream s;
+  s.add(0, 48000);                                   // close-delimited, but never closes
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(s, -1, 2000));
+  FakeStream slow;
+  slow.add(0, 1000);
+  slow.add(30000, 47000);                            // rest arrives after the timeout
+  TEST_ASSERT_EQUAL_INT32(-1, read_body(slow, 48000, 20000));
+}
+
+void test_reader_declared_length_ignores_open_connection() {
+  FakeStream s;
+  s.add(0, 48000);                                   // keep-alive: never closes, length says done
+  TEST_ASSERT_EQUAL_INT32(48000, read_body(s, 48000));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_classify_200_needs_exact_length);
@@ -280,5 +372,12 @@ int main(int, char**) {
   RUN_TEST(test_badge_box_bottom_right_and_contained);
   RUN_TEST(test_badge_overwrites_dark_background);
   RUN_TEST(test_glyph_one);
+  RUN_TEST(test_reader_declared_length_in_pieces);
+  RUN_TEST(test_reader_rejects_wrong_declared_length);
+  RUN_TEST(test_reader_close_delimited_exact);
+  RUN_TEST(test_reader_rejects_delayed_trailing_bytes);
+  RUN_TEST(test_reader_rejects_truncated_body);
+  RUN_TEST(test_reader_times_out_when_body_never_ends);
+  RUN_TEST(test_reader_declared_length_ignores_open_connection);
   return UNITY_END();
 }
