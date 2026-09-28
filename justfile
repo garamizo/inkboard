@@ -75,9 +75,15 @@ flash ENV="supermini-c6":
 flash-dev:
     #!/usr/bin/env bash
     set -euo pipefail
+    port=$(ls /dev/ttyACM* 2>/dev/null | head -1 || true)
+    if [[ -z "$port" ]]; then
+      echo "Board not on USB: its USB port is off while it deep-sleeps." >&2
+      echo "Hold BOOT, tap RESET, release BOOT (bootloader keeps USB up), then retry." >&2
+      exit 1
+    fi
     url="${INKBOARD_DEV_URL:-http://$(hostname -I | awk '{print $1}'):8765}"
-    echo "dev firmware -> $url (keep 'just dev' running here)"
-    PLATFORMIO_BUILD_FLAGS="-DSERVER_URL=\\\"$url\\\"" pio run -e supermini-c6 -t upload -t monitor
+    echo "dev firmware -> $url via $port (keep 'just dev' running here)"
+    PLATFORMIO_UPLOAD_PORT="$port" PLATFORMIO_MONITOR_PORT="$port" PLATFORMIO_BUILD_FLAGS="-DSERVER_URL=\\\"$url\\\"" pio run -e supermini-c6 -t upload -t monitor
 
 # Serial console.
 monitor:

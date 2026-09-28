@@ -11,6 +11,8 @@ results in the table at the end.
     `just flash-dev`, which points the firmware at `http://<this machine's LAN IP>:8765`.
     You don't need to deploy anything or set up the tunnel for this.
 - The serial monitor shows `GET -> <status>` and `sleeping <s> s` on each wake.
+- The board's USB port is off while it deep-sleeps, so flashing then finds no board. Put it
+  in the bootloader first: hold BOOT, tap RESET, release BOOT. After the upload, press RESET.
 - RESET (or a re-flash) keeps the board's wake state, so it behaves like an early timer wake.
   Unplugging the power clears that state: the first successful wake after power-up redraws
   the stored frame once, because the board can't know what the panel shows.
