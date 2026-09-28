@@ -474,6 +474,20 @@ void test_cycle_config_error_drawn_once() {
   TEST_ASSERT_EQUAL_STRING("fetch clear ", g_ops.log);
 }
 
+void test_idle_step_waits_only_while_a_computer_is_attached() {
+  TEST_ASSERT_TRUE(idle_step(true, 5000) == Idle::Wait);
+  TEST_ASSERT_TRUE(idle_step(false, 5000) == Idle::DeepSleep);   // unplugged: sleep the rest
+  TEST_ASSERT_TRUE(idle_step(true, 0) == Idle::RunNow);
+  TEST_ASSERT_TRUE(idle_step(false, -20) == Idle::RunNow);
+}
+
+void test_remaining_sleep_rounds_up_to_whole_seconds() {
+  TEST_ASSERT_EQUAL_INT32(1, remaining_sleep_s(1));
+  TEST_ASSERT_EQUAL_INT32(1, remaining_sleep_s(1000));
+  TEST_ASSERT_EQUAL_INT32(2, remaining_sleep_s(1001));
+  TEST_ASSERT_EQUAL_INT32(3660, remaining_sleep_s(3660000));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_classify_200_needs_exact_length);
@@ -514,5 +528,7 @@ int main(int, char**) {
   RUN_TEST(test_cycle_badge_on_third_failure_over_stored_frame);
   RUN_TEST(test_cycle_power_loss_with_badge_then_304_clears_it);
   RUN_TEST(test_cycle_config_error_drawn_once);
+  RUN_TEST(test_idle_step_waits_only_while_a_computer_is_attached);
+  RUN_TEST(test_remaining_sleep_rounds_up_to_whole_seconds);
   return UNITY_END();
 }

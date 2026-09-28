@@ -439,6 +439,11 @@ force a redundant refresh.
    - The duration is `X-Next-Refresh-Seconds`, clamped to 300–21600, or
      `FALLBACK_SLEEP_S` if the header is missing.
    - Turn Wi-Fi off, then `esp_deep_sleep`.
+   - **Exception: a computer on USB.** When the USB port sees a host (SOF frames; a charger
+     or power bank sends none), the board waits awake instead, so its USB port stays up for
+     flashing and logs. Unplugging it switches to deep sleep for the time left.
+     - Deep sleep turns USB off and the data pins can't wake the chip, so a computer
+       plugged in *during* sleep is only noticed at the next timer wake.
 
 ### 6.3 Failure handling
 

@@ -125,4 +125,15 @@ inline int32_t sleep_for(Outcome outcome, uint8_t fail_count_after, int32_t next
   }
 }
 
+// Between cycles: with a computer on USB the board stays awake (its USB port then stays up
+// for flashing and logs); otherwise it deep-sleeps whatever time is left.
+enum class Idle : uint8_t { Wait, RunNow, DeepSleep };
+
+inline Idle idle_step(bool computer_attached, int32_t ms_left) {
+  if (ms_left <= 0) return Idle::RunNow;
+  return computer_attached ? Idle::Wait : Idle::DeepSleep;
+}
+
+inline int32_t remaining_sleep_s(int32_t ms_left) { return ms_left <= 1000 ? 1 : (ms_left + 999) / 1000; }
+
 }  // namespace wake

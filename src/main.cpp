@@ -47,6 +47,8 @@ struct BoardOps {
   void show_error(const char* message) { panel_show_error(message, FRAME_QUERY); }
 };
 
+static BoardOps g_ops{false};
+
 static void deep_sleep(int32_t seconds) {
   Serial.printf("sleeping %ld s\n", static_cast<long>(seconds));
   Serial.flush();
@@ -73,9 +75,34 @@ void setup() {
   delay(30);
   digitalWrite(PIN_LED_STATUS, HIGH);
 
-  BoardOps ops{store_begin()};
-  Serial.printf("flash store: %s\n", ops.fs ? "mounted" : "UNAVAILABLE");
-  deep_sleep(wake::run_cycle(ops, g_rtc, g_frame, FALLBACK_SLEEP_S));
+  g_ops.fs = store_begin();
+  Serial.printf("flash store: %s\n", g_ops.fs ? "mounted" : "UNAVAILABLE");
 }
 
-void loop() {}  // never reached: setup() ends in deep sleep
+// One cycle, then wait for the next. With a computer on USB (it sends SOF frames; a charger
+// doesn't) the board stays awake so its USB port is always there for flashing and logs;
+// otherwise, or once unplugged, it deep-sleeps the rest. Deep sleep never returns: the next
+// timer wake starts again at setup().
+void loop() {
+  const int32_t sleep_s = wake::run_cycle(g_ops, g_rtc, g_frame, FALLBACK_SLEEP_S);
+  const uint32_t start = millis();
+  const int64_t total_ms = static_cast<int64_t>(sleep_s) * 1000;
+  bool announced = false;
+  for (;;) {
+    int32_t left = static_cast<int32_t>(total_ms - static_cast<int64_t>(millis() - start));
+    switch (wake::idle_step(HWCDC::isPlugged(), left)) {
+      case wake::Idle::RunNow:
+        return;
+      case wake::Idle::DeepSleep:
+        deep_sleep(wake::remaining_sleep_s(left));
+        return;
+      case wake::Idle::Wait:
+        if (!announced) {
+          Serial.printf("computer on USB: staying awake, next update in %ld s\n", static_cast<long>(sleep_s));
+          announced = true;
+        }
+        delay(1000);
+        break;
+    }
+  }
+}

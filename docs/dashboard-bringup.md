@@ -11,15 +11,16 @@ results in the table at the end.
     `just flash-dev`, which points the firmware at `http://<this machine's LAN IP>:8765`.
     You don't need to deploy anything or set up the tunnel for this.
 - The serial monitor shows `GET -> <status>` and `sleeping <s> s` on each wake.
-- The board's USB port is off while it deep-sleeps. `just flash-dev` builds first, then waits
-  for the next wake and uploads during it (no buttons; esptool resets the chip over USB).
-  To skip the wait: hold BOOT, tap RESET, release BOOT; press RESET after the upload.
+- While a computer is on its USB, the board stays awake between updates, so `just flash`,
+  `just flash-dev` and `just monitor` work any time. On battery or a charger it deep-sleeps,
+  and its USB port is off. A computer plugged in during sleep is noticed at the next wake.
+  `just flash-dev` waits for that wake by itself. To skip the wait: hold BOOT, tap RESET,
+  release BOOT, then press RESET after the upload.
 - RESET (or a re-flash) keeps the board's wake state, so it behaves like an early timer wake.
   Unplugging the power clears that state: the first successful wake after power-up redraws
   the stored frame once, because the board can't know what the panel shows.
-- Deep sleep drops USB serial. To see the next wake, reopen `just monitor` after the sleep,
-  or press RESET to run a wake immediately. The shortest sleep the board ever takes is
-  300 s (`wake::MIN_SLEEP_S`).
+- Press RESET to run a wake immediately. The shortest wait between wakes is 300 s
+  (`wake::MIN_SLEEP_S`).
 
 ## 1. Orientation and bit order
 Set `USE_CALIBRATION_PATTERN 1` in `include/config.h`, then flash (`just flash` or `just flash-dev`).
