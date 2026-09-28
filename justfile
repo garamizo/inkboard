@@ -88,8 +88,9 @@ flash-dev:
       sleep 0.2
     done
     [[ -n "$port" ]] || { echo "board never appeared on USB" >&2; exit 1; }
-    PLATFORMIO_UPLOAD_PORT="$port" PLATFORMIO_MONITOR_PORT="$port" \
-      pio run -e supermini-c6 -t nobuild -t upload -t monitor
+    # -p, not PLATFORMIO_UPLOAD_PORT: a changed env var changes PlatformIO's config checksum,
+    # which wipes the build folder (and the firmware just built) before `nobuild` runs.
+    pio run -e supermini-c6 -t nobuild -t upload -t monitor -p "$port"
 
 # Serial console.
 monitor:
