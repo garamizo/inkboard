@@ -15,6 +15,12 @@
 // For bring-up (docs/dashboard-bringup.md step 1): 1 fetches /v1/test.bin instead of the dashboard.
 #define USE_CALIBRATION_PATTERN 0
 
+// 1 (prod): deep-sleep between updates unless a computer is on USB. `just flash-dev` builds
+// with -DDEEP_SLEEP=0: the board never deep-sleeps, so USB and logs stay available.
+#ifndef INKBOARD_DEEP_SLEEP
+#define INKBOARD_DEEP_SLEEP 1
+#endif
+
 // Sleep when the server gives no X-Next-Refresh-Seconds, and after a config error.
 #define FALLBACK_SLEEP_S 3600
 

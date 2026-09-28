@@ -439,6 +439,8 @@ force a redundant refresh.
    - The duration is `X-Next-Refresh-Seconds`, clamped to 300–21600, or
      `FALLBACK_SLEEP_S` if the header is missing.
    - Turn Wi-Fi off, then `esp_deep_sleep`.
+   - **Dev builds** (`just flash-dev`, `-DINKBOARD_DEEP_SLEEP=0`) never deep-sleep. They
+     wait awake between updates. Prod builds keep deep sleep on.
    - **Exception: a computer on USB.** When the USB port sees a host (SOF frames; a charger
      or power bank sends none), the board waits awake instead, so its USB port stays up for
      flashing and logs. Unplugging it switches to deep sleep for the time left.

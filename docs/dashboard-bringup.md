@@ -11,6 +11,9 @@ results in the table at the end.
     `just flash-dev`, which points the firmware at `http://<this machine's LAN IP>:8765`.
     You don't need to deploy anything or set up the tunnel for this.
 - The serial monitor shows `GET -> <status>` and `sleeping <s> s` on each wake.
+- `just flash-dev` builds with deep sleep **off** (`INKBOARD_DEEP_SLEEP=0`): the dev board
+  waits awake between updates, so USB and logs are always there. Prod (`just flash`) keeps
+  deep sleep on.
 - While a computer is on its USB, the board stays awake between updates, so `just flash`,
   `just flash-dev` and `just monitor` work any time. On battery or a charger it deep-sleeps,
   and its USB port is off. A computer plugged in during sleep is noticed at the next wake.

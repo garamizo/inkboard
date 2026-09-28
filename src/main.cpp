@@ -75,6 +75,9 @@ void setup() {
   delay(30);
   digitalWrite(PIN_LED_STATUS, HIGH);
 
+#if !INKBOARD_DEEP_SLEEP
+  Serial.println("dev build: deep sleep disabled, server " SERVER_URL);
+#endif
   g_ops.fs = store_begin();
   Serial.printf("flash store: %s\n", g_ops.fs ? "mounted" : "UNAVAILABLE");
 }
@@ -90,7 +93,7 @@ void loop() {
   bool announced = false;
   for (;;) {
     int32_t left = static_cast<int32_t>(total_ms - static_cast<int64_t>(millis() - start));
-    switch (wake::idle_step(HWCDC::isPlugged(), left)) {
+    switch (wake::idle_step(!INKBOARD_DEEP_SLEEP || HWCDC::isPlugged(), left)) {
       case wake::Idle::RunNow:
         return;
       case wake::Idle::DeepSleep:
@@ -98,7 +101,8 @@ void loop() {
         return;
       case wake::Idle::Wait:
         if (!announced) {
-          Serial.printf("computer on USB: staying awake, next update in %ld s\n", static_cast<long>(sleep_s));
+          Serial.printf("%s: staying awake, next update in %ld s\n",
+                        INKBOARD_DEEP_SLEEP ? "computer on USB" : "deep sleep off (dev build)", static_cast<long>(sleep_s));
           announced = true;
         }
         delay(1000);

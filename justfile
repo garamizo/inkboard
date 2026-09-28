@@ -71,13 +71,13 @@ check:
 flash ENV="supermini-c6":
     pio run -e {{ENV}} -t upload -t monitor
 
-# Flash the dashboard pointed at this machine's `just dev` server (Linux; override with INKBOARD_DEV_URL).
+# Dev firmware: this machine's `just dev` server, deep sleep off (Linux; override with INKBOARD_DEV_URL).
 flash-dev:
     #!/usr/bin/env bash
     set -euo pipefail
     url="${INKBOARD_DEV_URL:-http://$(hostname -I | awk '{print $1}'):8765}"
     echo "dev firmware -> $url (keep 'just dev' running here)"
-    export PLATFORMIO_BUILD_FLAGS="-DSERVER_URL=\\\"$url\\\""
+    export PLATFORMIO_BUILD_FLAGS="-DSERVER_URL=\\\"$url\\\" -DINKBOARD_DEEP_SLEEP=0"
     pio run -e supermini-c6
     # The board's USB port only exists while it is awake (a few seconds per wake). Wait for
     # it, then upload at once: esptool resets the chip into the bootloader over USB itself.
@@ -89,8 +89,10 @@ flash-dev:
     done
     [[ -n "$port" ]] || { echo "board never appeared on USB" >&2; exit 1; }
     # -p, not PLATFORMIO_UPLOAD_PORT: a changed env var changes PlatformIO's config checksum,
-    # which wipes the build folder (and the firmware just built) before `nobuild` runs.
-    pio run -e supermini-c6 -t nobuild -t upload -t monitor -p "$port"
+    # which wipes the build folder. No `-t nobuild` either: on this platform it drops the
+    # bootloader/partition/app offsets from the esptool command. The build is up to date,
+    # so this only re-checks it before uploading.
+    pio run -e supermini-c6 -t upload -t monitor -p "$port"
 
 # Serial console.
 monitor:
