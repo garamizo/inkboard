@@ -62,7 +62,9 @@ wake::Fetched fetch_frame(const char* etag, uint8_t* buf) {
   http.collectHeaders(keys, 5);
   if (etag[0] != '\0') http.addHeader("If-None-Match", etag);
 
+  Serial.printf("GET %s\n", url.c_str());
   r.http_status = http.GET();
+  if (r.http_status < 0) Serial.printf("http error: %s\n", HTTPClient::errorToString(r.http_status).c_str());
   int32_t body = 0;
   if (r.http_status == 200) {
     uint32_t spent = millis() - started;

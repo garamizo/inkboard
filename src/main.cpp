@@ -2,6 +2,7 @@
 // The cycle and all decisions live in include/cycle.h and wake_logic.h (host-tested);
 // this file only supplies the hardware operations.
 #include <Arduino.h>
+#include <WiFi.h>
 #include <driver/gpio.h>
 #include <esp_sleep.h>
 #include <soc/soc_caps.h>
@@ -32,7 +33,12 @@ struct BoardOps {
   void clear_etag() { store_clear_etag(); }
   wake::Fetched fetch(const char* etag, uint8_t* buf) {
     wake::Fetched r;
-    if (wifi_connect(15000)) r = fetch_frame(etag, buf);
+    if (wifi_connect(15000)) {
+      Serial.printf("wifi: connected, ip %s\n", WiFi.localIP().toString().c_str());
+      r = fetch_frame(etag, buf);
+    } else {
+      Serial.printf("wifi: not connected (status %d)\n", static_cast<int>(WiFi.status()));
+    }
     wifi_off();  // before drawing: the refresh takes seconds
     Serial.printf("GET -> %d (sent etag: %s)\n", r.http_status, etag[0] ? etag : "none");
     return r;
@@ -68,6 +74,7 @@ void setup() {
   digitalWrite(PIN_LED_STATUS, HIGH);
 
   BoardOps ops{store_begin()};
+  Serial.printf("flash store: %s\n", ops.fs ? "mounted" : "UNAVAILABLE");
   deep_sleep(wake::run_cycle(ops, g_rtc, g_frame, FALLBACK_SLEEP_S));
 }
 
