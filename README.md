@@ -55,9 +55,8 @@ You need the assembled board ([docs/wiring.md](docs/wiring.md)), a USB-C data ca
 3. **Set your Wi-Fi credentials:** fill in `WIFI_SSID` and `WIFI_PASSWORD` in
    `include/secrets.h`. The file is gitignored, so your password never gets committed.
 
-   Optional: set your location and layout in `FRAME_QUERY` in `include/config.h`
-   (`lat`, `lon`, `tz`, `units`). Preview it at
-   `https://inkboard.signalwave.dev/v1/frame.png?<FRAME_QUERY>`.
+   Optional: set your location and widgets, see
+   [Change the dashboard layout](#change-the-dashboard-layout).
 
 4. **Flash.** Plug the board in over USB-C, then:
 
@@ -117,7 +116,54 @@ your board owners reflash), `public_url` in the `justfile`, and the tunnel's pub
 The firmware trusts only the root CAs in `include/ca_certs.h` (the ones Cloudflare's edge
 uses); regenerate it with `tools/gen_ca_certs.sh` if your certificate chains to another root.
 
-## Layout
+## Change the dashboard layout
+
+The board sends its whole layout to the server as a query string: `FRAME_QUERY` in
+`include/config.h`. The server keeps nothing per board, so a new layout only needs a
+reflash, not a server change.
+
+```c
+#define FRAME_QUERY \
+  "w=market_trends:2/3,calendar_weather:1/3&lat=34.05&lon=-118.24&tz=America/Los_Angeles&units=imperial"
+```
+
+1. **Pick the widgets with `w`:** up to three `type:size` entries, drawn as columns from left
+   to right. Sizes are `1/3`, `2/3` or `1` (full width) and must add up to the full width,
+   e.g. `market_trends:2/3,calendar_weather:1/3` or `calendar_weather:1`.
+2. **Set the options.** `tz` is global; the rest belong to a widget and are only allowed when
+   that widget is in `w`:
+
+   | Parameter | Widget | Values | Default |
+   |---|---|---|---|
+   | `tz` | all | IANA time zone, e.g. `America/New_York`; sets the date, clock and update times | `UTC` |
+   | `lat`, `lon` | `calendar_weather` | your location in degrees (rounded to 0.1°) | required |
+   | `units` | `calendar_weather` | `imperial` or `metric` | `imperial` |
+   | `series` | `market_trends` | 1 to 4 series ids, comma-separated (below) | `sp500,btc,mortgage30,home_la` |
+   | `years` | `market_trends` | chart span, 1 to 10 | `5` |
+
+   Series ids: `sp500` (S&P 500), `btc` (Bitcoin), `mortgage30` (30-year mortgage rate),
+   `home_la` (LA median home listing price), `ust10y` (10-year Treasury), `usd_broad`
+   (dollar index).
+3. **Preview it in a browser** before flashing:
+   `https://inkboard.signalwave.dev/v1/frame.png?<your FRAME_QUERY>`. A mistake returns a
+   one-line error instead of an image (e.g. `lat: not used by any widget in w`). The
+   server's home page, `https://inkboard.signalwave.dev/`, lists every widget and series.
+4. **Flash** with `just flash`. The new layout shows on the next update.
+
+Examples:
+
+```text
+w=calendar_weather:1&lat=40.7&lon=-74.0&tz=America/New_York&units=metric
+w=market_trends:1&series=sp500,btc,ust10y,usd_broad&years=10&tz=America/Chicago
+w=calendar_weather:1/3,market_trends:2/3&lat=51.5&lon=-0.1&tz=Europe/London&units=metric&series=sp500,ust10y
+```
+
+New widget types or market series are server changes: widgets live in
+`server/inkboard_server/widgets/` and series in `server/inkboard_server/series.py`. If you run
+the server, also update `query` in the `justfile` (used by `just check`) when you change the
+default layout.
+
+## Repository layout
 
 ```
 VERSION              release version (dashboard footer, board User-Agent); dev builds add -<git hash>
