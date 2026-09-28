@@ -10,17 +10,119 @@ case.
 **Stack:** C++ / Arduino-ESP32 3.x / PlatformIO ([why](docs/toolchain.md)), display via
 [GxEPD2](https://github.com/ZinggJM/GxEPD2).
 
-## Quick start
+## First-time setup
 
-```bash
-uv tool install platformio
-just flash-dev smoke  # hardware smoke test + Wi-Fi check against this machine's `just dev`
-just flash smoke      # same, network check against the public server (inkboard.signalwave.dev)
-just flash            # dashboard firmware (prod API); `just flash-dev` targets this machine's `just dev`
-```
+There are two roles. A **board owner** only builds and flashes the firmware; the board talks to
+the public server at `https://inkboard.signalwave.dev`. A **server provider** runs that render
+server (API keys, Docker, Cloudflare Tunnel). Most people only need the first section.
 
-Wire it first: [docs/wiring.md](docs/wiring.md). Then check the results against
-[docs/smoke-test.md](docs/smoke-test.md).
+### Board owner (Linux or Windows): Wi-Fi + flash
+
+You need the assembled board ([docs/wiring.md](docs/wiring.md)), a USB-C data cable and a
+2.4 GHz Wi-Fi network (the ESP32-C6 has no 5 GHz radio).
+
+1. **Install the tools:** git, [just](https://github.com/casey/just),
+   [uv](https://docs.astral.sh/uv/) and PlatformIO.
+
+   Linux:
+
+   ```bash
+   # git and just from your package manager, e.g. sudo apt install git just
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   uv tool install platformio
+   sudo usermod -aG dialout $USER   # serial port access; log out and back in afterwards
+   ```
+
+   Windows (PowerShell; open a new terminal afterwards so the tools are on `PATH`):
+
+   ```powershell
+   winget install Git.Git Casey.Just astral-sh.uv
+   uv tool install platformio
+   uv tool update-shell
+   ```
+
+   Windows 10/11 needs no USB driver: the board shows up as a `COM` port on its own.
+
+   Use one PlatformIO install. If you also use the VS Code PlatformIO extension, point `pio`
+   at the extension's copy instead of installing a second one; two versions building the same
+   project delete each other's build files ([#1](https://github.com/garamizo/inkboard/issues/1)).
+
+2. **Get the code:**
+
+   ```bash
+   git clone https://github.com/garamizo/inkboard.git
+   cd inkboard
+   ```
+
+3. **Set your Wi-Fi credentials.** Copy the template (it is gitignored, so your password
+   never gets committed) and fill in `WIFI_SSID` and `WIFI_PASSWORD`:
+
+   ```bash
+   cp include/secrets.h.example include/secrets.h   # works in PowerShell too
+   ```
+
+   Optional: set your location and layout in `FRAME_QUERY` in `include/config.h`
+   (`lat`, `lon`, `tz`, `units`). Preview it at
+   `https://inkboard.signalwave.dev/v1/frame.png?<FRAME_QUERY>`.
+
+4. **Flash.** Plug the board in over USB-C, then:
+
+   ```bash
+   just flash smoke   # optional: hardware + Wi-Fi check first, see docs/smoke-test.md
+   just flash         # dashboard firmware, then the serial monitor (Ctrl+C to exit)
+   ```
+
+   The first build downloads the toolchain (~1 GB into `~/.platformio`) and takes a few
+   minutes. If the upload can't connect, for example because the board is in deep sleep,
+   hold **BOOT**, tap **RESET**, release **BOOT** and run `just flash` again, then tap RESET
+   once more to start the firmware. More troubleshooting: [docs/smoke-test.md](docs/smoke-test.md).
+
+### Server provider (Linux): API keys + deploy
+
+The render server lives in `server/` (Python, served by Docker Compose). It is published
+through a Cloudflare Tunnel, so no router port is opened. You need Linux with Docker (Compose
+v2), git, just and uv.
+
+1. **Clone and test:**
+
+   ```bash
+   git clone https://github.com/garamizo/inkboard.git ~/inkboard
+   cd ~/inkboard
+   just test            # server tests, no network needed
+   ```
+
+2. **Create `server/.env`** from the template. It is gitignored; never commit it:
+
+   ```bash
+   cp server/.env.example server/.env
+   ```
+
+   | Variable | Where to get it |
+   |---|---|
+   | `FRED_API_KEY` | Free key from [fredaccount.stlouisfed.org/apikeys](https://fredaccount.stlouisfed.org/apikeys) (market data). Weather (Open-Meteo) needs no key. |
+   | `CLOUDFLARE_TUNNEL_TOKEN` | Cloudflare Zero Trust → Networks → Tunnels: the token after `--token`. One-time tunnel, DNS, cache and bot settings: [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md). |
+   | `LOG_LEVEL` | Optional, default `INFO`. |
+
+3. **Try it locally:** `just dev` serves on port 8765 with auto-reload and reads
+   `server/.env`. It never touches production. Preview a frame at
+   `http://127.0.0.1:8765/v1/frame.png?w=market_trends:2/3,calendar_weather:1/3&lat=34.05&lon=-118.24&tz=America/Los_Angeles`.
+   To point a board at it, use `just flash-dev` (see [docs/dashboard-bringup.md](docs/dashboard-bringup.md)).
+
+4. **Deploy:** `just up` builds and starts the server and `cloudflared` from a clean checkout
+   of `main`, and refuses to run without both keys. Then:
+
+   ```bash
+   just check           # local + public health checks, opens the public frame
+   just logs cloudflared   # expect "Registered tunnel connection"
+   just down            # stop (the public site goes offline)
+   ```
+
+   The containers restart on their own after a reboot (`restart: unless-stopped`).
+
+**Hosting under a different domain:** change `SERVER_URL` in `include/config.h` (and have
+your board owners reflash), `public_url` in the `justfile`, and the tunnel's public hostname.
+The firmware trusts only the root CAs in `include/ca_certs.h` (the ones Cloudflare's edge
+uses); regenerate it with `tools/gen_ca_certs.sh` if your certificate chains to another root.
 
 ## Layout
 
