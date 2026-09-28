@@ -115,16 +115,20 @@ class CachedSource:
         retry_after: timedelta = timedelta(minutes=5),
         stale_after: timedelta | None = None,
         cold_wait_s: float = 8.0,
+        refresh_wait_s: float = 3.0,
         executor: Executor | None = None,
         clock: Callable[[], datetime] = utcnow,
     ):
         self.name = name
         self.fetch = fetch
         self.ttl = ttl
-        self.stale_after = stale_after or 2 * ttl
+        # Staleness must not depend on how often boards wake (hourly): only a failed refresh,
+        # or data this far past its TTL (refreshes hanging or not starting), counts.
+        self.stale_after = stale_after or ttl + timedelta(minutes=90)
         self.max_entries = max_entries
         self.retry_after = retry_after
         self.cold_wait_s = cold_wait_s
+        self.refresh_wait_s = refresh_wait_s
         self.executor = executor or _BACKGROUND
         self.clock = clock
         self.upstream_calls = 0
@@ -145,14 +149,19 @@ class CachedSource:
         return self.name + ":" + json.dumps(params, sort_keys=True, separators=(",", ":"))
 
     def get(self, params: dict, deadline: float | None = None) -> SourceResult:
-        """`deadline` is a time.monotonic() value; it bounds only the wait for a cold key."""
+        """`deadline` is a time.monotonic() value bounding any wait for a refresh.
+
+        An expired entry waits briefly (refresh_wait_s) for its refresh, then falls back to
+        the cached data; a cold key waits up to cold_wait_s. Neither waits past `deadline`.
+        """
         key = self.key_for(params)
         entry = self._lookup(key)
         if entry is not None and self.clock() - entry.fetched_at < self.ttl:
             return self._result(key, entry)
         future = self._start_refresh(key, params)
-        if future is not None and entry is None:
-            wait([future], timeout=self._wait_budget(deadline))
+        if future is not None:
+            limit = self.cold_wait_s if entry is None else self.refresh_wait_s
+            wait([future], timeout=self._wait_budget(deadline, limit))
         entry = self._lookup(key)
         if entry is None:
             raise NoData(self.name)
@@ -178,8 +187,8 @@ class CachedSource:
         failed = entry.last_failure is not None and entry.last_failure >= entry.fetched_at
         return SourceResult(key, entry.data, entry.fetched_at, failed or age >= self.stale_after)
 
-    def _wait_budget(self, deadline: float | None) -> float:
-        budget = self.cold_wait_s
+    def _wait_budget(self, deadline: float | None, limit: float) -> float:
+        budget = limit
         if deadline is not None:
             budget = min(budget, deadline - time.monotonic())
         return max(0.0, budget)

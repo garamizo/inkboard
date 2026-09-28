@@ -131,10 +131,10 @@ def test_stale_after_even_without_a_reported_failure(clock, tmp_path):
     src2 = make(clock, tmp_path / "other", Upstream())
     src2.get({"a": 1})
     src2._start_refresh = lambda key, params: None  # refreshes never start
-    clock.advance(minutes=45)
-    assert not src2.get({"a": 1}).stale  # 45 min < 2 x TTL
-    clock.advance(minutes=20)
-    assert src2.get({"a": 1}).stale      # 65 min >= 2 x TTL
+    clock.advance(minutes=115)
+    assert not src2.get({"a": 1}).stale  # 115 min < TTL + 90 min
+    clock.advance(minutes=10)
+    assert src2.get({"a": 1}).stale      # 125 min >= TTL + 90 min
 
 
 def test_expired_entry_returns_immediately_while_refreshing(clock, tmp_path):
@@ -145,8 +145,8 @@ def test_expired_entry_returns_immediately_while_refreshing(clock, tmp_path):
     clock.advance(minutes=31)
     up.block[1] = threading.Event()
     t0 = time.monotonic()
-    r = src.get({"a": 1})
-    assert time.monotonic() - t0 < 0.2
+    r = src.get({"a": 1}, deadline=time.monotonic() + 0.1)
+    assert time.monotonic() - t0 < 0.4
     assert r.fetched_at == first.fetched_at and not r.stale  # refresh in flight, not failed
     up.block[1].set()
     pool.shutdown(wait=True)
@@ -262,3 +262,33 @@ def test_health(clock, tmp_path):
     h = src.health()
     assert h == {"entries": 1, "newest_fetch": clock().isoformat(), "upstream_calls": 1,
                  "calls_today": 1, "refreshing": 0}
+
+
+def test_hourly_wakes_with_real_pool_stay_fresh(clock, tmp_path):
+    # Review C1: a board waking every ~60 min (TTL 30 min) must get the refresh it
+    # triggered, not the previous wake's data flagged stale.
+    up = Upstream()
+    up.delay = 0.05
+    pool = ThreadPoolExecutor(2)
+    src = make(clock, tmp_path, up, executor=pool)
+    for jitter in (0, 25, 3, 30, 11, 0):
+        r = src.get({"a": 1}, deadline=time.monotonic() + 10)
+        assert not r.stale
+        assert r.fetched_at == clock()
+        clock.advance(minutes=60, seconds=jitter)
+    pool.shutdown(wait=True)
+
+
+def test_hung_refresh_serves_cached_within_deadline(clock, tmp_path):
+    up = Upstream()
+    pool = ThreadPoolExecutor(2)
+    src = make(clock, tmp_path, up, executor=pool)
+    first = src.get({"a": 1}, deadline=time.monotonic() + 5)
+    clock.advance(minutes=31)
+    up.block[1] = threading.Event()
+    t0 = time.monotonic()
+    r = src.get({"a": 1}, deadline=time.monotonic() + 0.2)
+    assert time.monotonic() - t0 < 0.5
+    assert r.fetched_at == first.fetched_at and not r.stale
+    up.block[1].set()
+    pool.shutdown(wait=True)

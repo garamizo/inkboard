@@ -195,12 +195,16 @@ class Widget(ABC):
   - It keeps results in memory and persists them as JSON under `$INKBOARD_CACHE_DIR`
     (a Docker volume), so a restart does not re-fetch everything.
   - **Stale-while-revalidate:**
-    - An *expired* entry is returned immediately while one background refresh runs.
+    - An *expired* entry waits briefly (up to 3 s, within the request deadline) for its
+      refresh. If the refresh is slow, the cached entry is served while the refresh
+      finishes in the background.
     - Only a key with no data waits for its fetch, and never past the request's deadline
       (10 s per request, under the board's 20 s timeout). On timeout the widget shows
       "No data yet".
-    - A result is `stale=True` when the entry's last refresh failed, or when it is older
-      than 2 × TTL.
+    - A result is `stale=True` when the entry's last refresh failed, or when it is more
+      than 90 min past its TTL.
+      - The rule deliberately does not depend on how often boards wake. With 2 × TTL,
+        hourly boards and a 30-min weather TTL got a spurious warning at every wake.
   - **Caps that survive restarts:**
     - The disk cache is pruned to its cap at start-up and on every write.
     - The daily upstream budget is stored in the cache volume.
