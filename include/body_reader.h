@@ -7,11 +7,14 @@
 namespace body {
 
 // Returns `expect` for a complete body of exactly that size, else -1.
+// stream may be null (HTTPClient::getStreamPtr() after the server already closed): a failure.
 // content_length: the header's value, or -1 when absent (body ends at connection close).
 template <class Stream, class Now, class Idle>
-int32_t read_exact(Stream& s, uint8_t* buf, int32_t expect, int32_t content_length, uint32_t timeout_ms,
+int32_t read_exact(Stream* stream, uint8_t* buf, int32_t expect, int32_t content_length, uint32_t timeout_ms,
                    Now now_ms, Idle idle) {
+  if (stream == nullptr) return -1;
   if (content_length >= 0 && content_length != expect) return -1;
+  Stream& s = *stream;
   const uint32_t start = now_ms();
   int32_t got = 0;
   while (got < expect) {

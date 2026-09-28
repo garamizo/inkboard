@@ -285,7 +285,7 @@ static uint8_t g_body[48000];
 
 static int32_t read_body(FakeStream& s, int32_t content_length, uint32_t timeout_ms = 20000) {
   g_now = 0;
-  return body::read_exact(s, g_body, 48000, content_length, timeout_ms,
+  return body::read_exact(&s, g_body, 48000, content_length, timeout_ms,
                           [] { return g_now; }, [] { g_now += 5; });
 }
 
@@ -338,6 +338,14 @@ void test_reader_times_out_when_body_never_ends() {
   slow.add(0, 1000);
   slow.add(30000, 47000);                            // rest arrives after the timeout
   TEST_ASSERT_EQUAL_INT32(-1, read_body(slow, 48000, 20000));
+}
+
+void test_reader_null_stream_is_a_failure() {
+  // HTTPClient::getStreamPtr() returns nullptr when the server closed right after the headers.
+  FakeStream* none = nullptr;
+  g_now = 0;
+  TEST_ASSERT_EQUAL_INT32(-1, body::read_exact(none, g_body, 48000, -1, 20000, [] { return g_now; },
+                                               [] { g_now += 5; }));
 }
 
 void test_reader_declared_length_ignores_open_connection() {
@@ -500,6 +508,7 @@ int main(int, char**) {
   RUN_TEST(test_reader_rejects_truncated_body);
   RUN_TEST(test_reader_times_out_when_body_never_ends);
   RUN_TEST(test_reader_declared_length_ignores_open_connection);
+  RUN_TEST(test_reader_null_stream_is_a_failure);
   RUN_TEST(test_cycle_saves_etag_only_after_showing);
   RUN_TEST(test_cycle_cold_boot_304_restores_stored_frame);
   RUN_TEST(test_cycle_badge_on_third_failure_over_stored_frame);

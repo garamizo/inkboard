@@ -11,6 +11,9 @@ results in the table at the end.
     `just flash-dev`, which points the firmware at `http://<this machine's LAN IP>:8765`.
     You don't need to deploy anything or set up the tunnel for this.
 - The serial monitor shows `GET -> <status>` and `sleeping <s> s` on each wake.
+- RESET (or a re-flash) keeps the board's wake state, so it behaves like an early timer wake.
+  Unplugging the power clears that state: the first successful wake after power-up redraws
+  the stored frame once, because the board can't know what the panel shows.
 - Deep sleep drops USB serial. To see the next wake, reopen `just monitor` after the sleep,
   or press RESET to run a wake immediately. The shortest sleep the board ever takes is
   300 s (`wake::MIN_SLEEP_S`).

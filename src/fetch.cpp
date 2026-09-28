@@ -37,18 +37,25 @@ void wifi_off() {
   WiFi.mode(WIFI_OFF);
 }
 
+// Spec §6.2: the whole fetch (connect, TLS, headers, body) gets about 20 s.
+static constexpr uint32_t kFetchBudgetMs = 20000;
+
 wake::Fetched fetch_frame(const char* etag, uint8_t* buf) {
   wake::Fetched r;
+  const uint32_t started = millis();
   String url = String(SERVER_URL) + (USE_CALIBRATION_PATTERN ? "/v1/test.bin" : "/v1/frame.bin?" FRAME_QUERY);
   bool tls = url.startsWith("https://");
   NetworkClientSecure secure;
   NetworkClient plain;
-  if (tls) secure.setCACert(CA_BUNDLE_PEM);
+  if (tls) {
+    secure.setCACert(CA_BUNDLE_PEM);
+    secure.setHandshakeTimeout(10);  // seconds; the library default is 120
+  }
 
   HTTPClient http;
   http.useHTTP10(true);  // no chunked encoding: a plain body of Content-Length bytes, or until close
-  http.setConnectTimeout(10000);
-  http.setTimeout(20000);
+  http.setConnectTimeout(8000);
+  http.setTimeout(10000);  // per wait for headers/data
   http.setUserAgent("inkboard/1.0");
   if (!http.begin(tls ? static_cast<NetworkClient&>(secure) : plain, url)) return r;
   static const char* keys[] = {"ETag", "X-Next-Refresh-Seconds", "X-UTC-Offset-Seconds", "Date", "Retry-After"};
@@ -58,7 +65,10 @@ wake::Fetched fetch_frame(const char* etag, uint8_t* buf) {
   r.http_status = http.GET();
   int32_t body = 0;
   if (r.http_status == 200) {
-    body = body::read_exact(*http.getStreamPtr(), buf, wake::FRAME_BYTES, http.getSize(), 20000,
+    uint32_t spent = millis() - started;
+    uint32_t left = spent < kFetchBudgetMs ? kFetchBudgetMs - spent : 0;
+    // getStreamPtr() is null when the server closed right after the headers.
+    body = body::read_exact(http.getStreamPtr(), buf, wake::FRAME_BYTES, http.getSize(), left,
                             [] { return static_cast<uint32_t>(millis()); }, [] { delay(5); });
     String tag = http.header("ETag");
     if (tag.length() < sizeof(r.etag)) strncpy(r.etag, tag.c_str(), sizeof(r.etag) - 1);

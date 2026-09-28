@@ -13,7 +13,9 @@
 #include "panel.h"
 #include "pins.h"
 
-RTC_DATA_ATTR static wake::Rtc g_rtc;  // survives deep sleep; magic mismatch = cold boot
+// RTC_NOINIT_ATTR survives deep sleep AND reset/panic (RTC_DATA_ATTR would be zeroed on
+// RESET); only power loss leaves garbage, which the magic check turns into a cold boot.
+RTC_NOINIT_ATTR static wake::Rtc g_rtc;
 static uint8_t g_frame[wake::FRAME_BYTES];
 
 struct BoardOps {
@@ -55,6 +57,10 @@ static void deep_sleep(int32_t seconds) {
 
 void setup() {
   Serial.begin(115200);
+  // Keep the HAT off while awake: drive PWR LOW before releasing the deep-sleep hold,
+  // otherwise GPIO1 floats (no pull-down on the switch) during Wi-Fi and the fetch.
+  pinMode(PIN_EPD_PWR, OUTPUT);
+  digitalWrite(PIN_EPD_PWR, LOW);
   gpio_hold_dis(static_cast<gpio_num_t>(PIN_EPD_PWR));
   pinMode(PIN_LED_STATUS, OUTPUT);  // heartbeat
   digitalWrite(PIN_LED_STATUS, LOW);
