@@ -7,7 +7,7 @@
 //   4. e-Paper panel: full black, then a test pattern (full refresh),
 //      then a soak test that runs until reset: a status line updated with a
 //      partial refresh every second, and the whole pattern redrawn with a
-//      full refresh every minute
+//      full refresh every 10 minutes
 //   5. Network: joins Wi-Fi with include/secrets.h and fetches SERVER_URL/v1/test.bin
 //      (`just flash-dev smoke` points SERVER_URL at this machine's dev server)
 // Press BOOT to run the wiring check and display test again.
@@ -42,7 +42,7 @@ constexpr int EPD_RESET_MS = 2;
 // Soak-test cadence. A partial refresh takes ~1.2 s, so in practice partials
 // run back to back; the full refresh clears the ghosting they accumulate.
 constexpr uint32_t PARTIAL_EVERY_MS = 1000;
-constexpr uint32_t FULL_EVERY_MS = 60 * 1000;
+constexpr uint32_t FULL_EVERY_MS = 10 * 60 * 1000;
 
 // Status box at the bottom of the pattern, redrawn by every partial refresh.
 constexpr int STATUS_X = 24, STATUS_Y = 400, STATUS_W = 520, STATUS_H = 50;

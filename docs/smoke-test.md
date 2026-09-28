@@ -15,8 +15,9 @@ assemble the case, while the wires are still easy to reach.
    pio run -e smoke -t upload -t monitor
    ```
 
-   `just flash-dev smoke` does the same, but points the network check at this machine's
-   `just dev` server, and waits for a sleeping board to wake before uploading.
+   `just flash smoke` does the same; its network check fetches from the public server.
+   `just flash-dev smoke` points the check at this machine's `just dev` server instead, and
+   waits for a sleeping board to wake before uploading.
 
    If the upload can't connect, hold **BOOT**, tap **RESET**, release **BOOT**, and retry.
    After a manual bootloader entry, tap RESET once more after flashing to start the firmware.
@@ -56,7 +57,7 @@ Full refresh (all black): 3382 ms
 Full refresh 1: 3082 ms
 _Update_Part : 1162001
 First partial refresh: 1322 ms
-Soak test running: partial refresh every 1 s, full every 60 s.
+Soak test running: partial refresh every 1 s, full every 600 s.
 ...
 Full refresh 2: 3100 ms  (last minute: 48 partial, avg 1190 ms, max 1322 ms)
 ```
@@ -67,7 +68,7 @@ illustrative; the rest is a real run.)
 
 After the first two refreshes the test keeps running as a **soak test** until reset: the
 status box is redrawn with a partial refresh every second, and the whole screen with a full
-refresh every minute. A partial refresh takes ~1.2 s, so partials in practice run back to back,
+refresh every 10 minutes. A partial refresh takes ~1.2 s, so partials in practice run back to back,
 about 48-50 per minute. Each full refresh prints a one-line summary of the partial timings
 since the previous one. A sudden jump in `max`, or a `Busy Timeout!`, is the thing to watch.
 
@@ -89,7 +90,7 @@ The panel goes **all black**, then shows the **test pattern**:
 | Line ladder 1-8 px (center) | Fine detail, SPI signal integrity | Jagged or missing thin lines, random noise |
 | Solid black block and ring (right) | Full-ink areas | Grey patches, speckles, a "crack" line |
 | Corner labels TR / BL / BR | Orientation and edges | Text cut off |
-| Status box (bottom) | Partial refresh | The `partial` count and uptime tick about once a second without the rest of the screen flashing; every minute the whole screen flashes once and `full` goes up |
+| Status box (bottom) | Partial refresh | The `partial` count and uptime tick about once a second without the rest of the screen flashing; every 10 minutes the whole screen flashes once and `full` goes up |
 
 A cracked panel usually shows a permanent line or a region that never changes. A
 connector problem shows up as whole missing stripes, or as noise that changes between
