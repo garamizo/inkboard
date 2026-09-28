@@ -194,12 +194,22 @@ class Widget(ABC):
 - **`CachedSource`** wraps a fetch function.
   - It keeps results in memory and persists them as JSON under `$INKBOARD_CACHE_DIR`
     (a Docker volume), so a restart does not re-fetch everything.
-  - When the TTL expires it fetches again. If that fetch fails, it returns the last good
-    value with `stale=True`.
+  - **Stale-while-revalidate:**
+    - An *expired* entry is returned immediately while one background refresh runs.
+    - Only a key with no data waits for its fetch, and never past the request's deadline
+      (10 s per request, under the board's 20 s timeout). On timeout the widget shows
+      "No data yet".
+    - A result is `stale=True` when the entry's last refresh failed, or when it is older
+      than 2 × TTL.
+  - **Caps that survive restarts:**
+    - The disk cache is pruned to its cap at start-up and on every write.
+    - The daily upstream budget is stored in the cache volume.
+    - Failed never-cached keys are LRU-capped too.
   - Every result is a `SourceResult(data, fetched_at, stale)`. `fetched_at` is the time
     of the last *successful* fetch. These three fields are the source's **version**, and
     they are exactly what rendering can see: no other source metadata reaches a widget.
-  - Concurrent requests for the same key share one in-flight fetch.
+  - Concurrent requests for the same key share one in-flight fetch (tracked apart from
+    cache eviction, so evicting a key mid-refresh cannot start a second fetch).
   - Upstream timeouts are 10 s.
 - **FRED:**
   - Uses the official API with `FRED_API_KEY` from the environment, not the keyless
