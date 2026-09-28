@@ -103,3 +103,21 @@ def test_sources_health(sources):
     h = sources.health()
     assert set(h) == {"fred", "weather"}
     assert h["fred"]["entries"] == 1
+
+
+def test_fred_errors_do_not_leak_the_api_key(clock):
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    with pytest.raises(RuntimeError) as exc:
+        fred.make_fetch(client, "SECRETKEY", clock)({"series_id": "SP500"})
+    assert "SECRETKEY" not in str(exc.value) and "SECRETKEY" not in repr(exc.value)
+    assert "SP500" in str(exc.value) and "500" in str(exc.value)
+    assert exc.value.__cause__ is None and exc.value.__suppress_context__
+
+
+def test_logging_config_silences_httpx_request_lines():
+    import logging
+
+    from inkboard_server.main import configure_logging
+    configure_logging("INFO")
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+    assert logging.getLogger("httpcore").getEffectiveLevel() >= logging.WARNING

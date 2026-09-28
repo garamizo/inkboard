@@ -25,9 +25,16 @@ def make_fetch(client: httpx.Client, api_key: str, clock) -> Callable[[dict], li
         if not api_key:
             raise RuntimeError("FRED_API_KEY is not set")
         start = date(clock().year - HISTORY_YEARS, 1, 1).isoformat()
-        r = client.get(FRED_URL, params={"series_id": params["series_id"], "api_key": api_key,
-                                          "file_type": "json", "observation_start": start}, timeout=10)
-        r.raise_for_status()
+        sid = params["series_id"]
+        try:
+            r = client.get(FRED_URL, params={"series_id": sid, "api_key": api_key,
+                                              "file_type": "json", "observation_start": start}, timeout=10)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # httpx errors carry the full URL, which contains api_key: never let them reach logs.
+            raise RuntimeError(f"FRED {sid}: HTTP {exc.response.status_code}") from None
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"FRED {sid}: {type(exc).__name__}") from None
         return parse_observations(r.json())
 
     return fetch
