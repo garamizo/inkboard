@@ -47,6 +47,54 @@ class FakeClock:
         self.t += timedelta(**kw)
 
 
+import json
+from collections import Counter
+from datetime import date, time
+from zoneinfo import ZoneInfo
+
+from inkboard_server.sources import make_sources
+from inkboard_server.sources import fred as fred_mod
+from inkboard_server.sources.base import InlineExecutor
+from inkboard_server.sources import openmeteo
+
+LA = ZoneInfo("America/Los_Angeles")
+WEATHER_LA = json.loads((FIXTURES / "weather_la.json").read_text())
+FIXTURES_TODAY = date.fromisoformat(WEATHER_LA["daily"]["time"][0])
+FIXED_NOW = datetime.combine(FIXTURES_TODAY, time(10, 0), LA)
+
+
+class FakeUpstream:
+    """Serves recorded fixtures; set .fail to simulate an outage."""
+
+    def __init__(self):
+        self.fail = False
+        self.calls = Counter()
+
+    def fred(self, params):
+        self.calls["fred"] += 1
+        if self.fail:
+            raise RuntimeError("fred down")
+        payload = json.loads((FIXTURES / f"fred_{params['series_id']}.json").read_text())
+        return fred_mod.parse_observations(payload)
+
+    def weather(self, params):
+        self.calls["weather"] += 1
+        if self.fail:
+            raise RuntimeError("open-meteo down")
+        return openmeteo.parse_forecast(WEATHER_LA)
+
+
 @pytest.fixture
 def clock():
-    return FakeClock(datetime(2026, 9, 27, 17, 0, tzinfo=timezone.utc))
+    return FakeClock(FIXED_NOW.astimezone(timezone.utc))
+
+
+@pytest.fixture
+def upstream():
+    return FakeUpstream()
+
+
+@pytest.fixture
+def sources(tmp_path, upstream, clock):
+    return make_sources(upstream.fred, upstream.weather, cache_dir=tmp_path, clock=clock,
+                        executor=InlineExecutor())  # deterministic: refreshes finish inside get()
