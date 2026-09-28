@@ -74,8 +74,15 @@ class _Entry:
     last_failure: datetime | None = None
 
 
+NEW_KEY_SHARE = 0.5  # fetches for never-seen keys may use at most this share of the daily cap
+
+
 class _DailyBudget:
-    """Upstream calls per UTC day, persisted so a restart does not reset the count."""
+    """Upstream calls per UTC day, persisted so a restart does not reset the count.
+
+    Keys with no data yet (anyone can invent a location) may spend only NEW_KEY_SHARE of
+    the cap, so refreshes for keys real boards already use always have budget left.
+    """
 
     def __init__(self, cap: int | None, path: Path | None):
         self.cap, self.path = cap, path
@@ -88,13 +95,14 @@ class _DailyBudget:
             except (OSError, ValueError, KeyError) as exc:
                 log.warning("ignoring unreadable budget file %s: %r", path, exc)
 
-    def take(self, now: datetime) -> bool:
+    def take(self, now: datetime, new_key: bool) -> bool:
         """Caller holds the source lock."""
         if self.cap is None:
             return True
         if self.day != now.date():
             self.day, self.calls = now.date(), 0
-        if self.calls >= self.cap:
+        limit = self.cap * NEW_KEY_SHARE if new_key else self.cap
+        if self.calls >= limit:
             return False
         self.calls += 1
         if self.path is not None:
@@ -203,7 +211,7 @@ class CachedSource:
             last_failure = entry.last_failure if entry else self._miss_failures.get(key)
             if last_failure is not None and now - last_failure < self.retry_after:
                 return None
-            if not self._budget.take(now):
+            if not self._budget.take(now, new_key=entry is None):
                 log.warning("%s: daily upstream budget reached; serving cached data", self.name)
                 self._record_failure(key, now)
                 return None

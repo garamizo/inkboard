@@ -244,10 +244,10 @@ def test_startup_prunes_oldest_files(clock, tmp_path):
 
 def test_daily_cap_persists_across_restarts(clock, tmp_path):
     up = Upstream()
-    src = make(clock, tmp_path, up, daily_cap=2)
+    src = make(clock, tmp_path, up, daily_cap=4)   # new keys may use 2 of the 4
     src.get({"a": 1})
     src.get({"a": 2})
-    restarted = make(clock, tmp_path, up, daily_cap=2)
+    restarted = make(clock, tmp_path, up, daily_cap=4)  # without persistence a=3 would be allowed
     with pytest.raises(NoData):
         restarted.get({"a": 3})
     assert up.calls == 2
@@ -292,3 +292,18 @@ def test_hung_refresh_serves_cached_within_deadline(clock, tmp_path):
     assert r.fetched_at == first.fetched_at and not r.stale
     up.block[1].set()
     pool.shutdown(wait=True)
+
+
+def test_new_keys_cannot_spend_the_refresh_reserve(clock, tmp_path):
+    # Review I3: anonymous clients inventing locations must not starve refreshes of
+    # keys that real boards already use.
+    up = Upstream()
+    src = make(clock, tmp_path, up, daily_cap=4)   # new keys may use at most half
+    src.get({"a": 1})
+    src.get({"a": 2})
+    with pytest.raises(NoData):
+        src.get({"a": 3})                          # third new key: over the 50% share
+    clock.advance(minutes=31)
+    assert not src.get({"a": 1}).stale             # refresh of a known key still allowed
+    assert not src.get({"a": 2}).stale
+    assert up.calls == 4
