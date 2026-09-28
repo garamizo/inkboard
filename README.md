@@ -21,45 +21,39 @@ server (API keys, Docker, Cloudflare Tunnel). Most people only need the first se
 You need the assembled board ([docs/wiring.md](docs/wiring.md)), a USB-C data cable and a
 2.4 GHz Wi-Fi network (the ESP32-C6 has no 5 GHz radio).
 
-1. **Install the tools:** git, [just](https://github.com/casey/just),
-   [uv](https://docs.astral.sh/uv/) and PlatformIO.
+1. **Install git, [just](https://github.com/casey/just) and [uv](https://docs.astral.sh/uv/).**
 
    Linux:
 
    ```bash
-   # git and just from your package manager, e.g. sudo apt install git just
+   sudo apt install git just   # or your distro's package manager
    curl -LsSf https://astral.sh/uv/install.sh | sh
-   uv tool install platformio
-   sudo usermod -aG dialout $USER   # serial port access; log out and back in afterwards
    ```
 
    Windows (PowerShell; open a new terminal afterwards so the tools are on `PATH`):
 
    ```powershell
    winget install Git.Git Casey.Just astral-sh.uv
-   uv tool install platformio
-   uv tool update-shell
    ```
 
    Windows 10/11 needs no USB driver: the board shows up as a `COM` port on its own.
 
-   Use one PlatformIO install. If you also use the VS Code PlatformIO extension, point `pio`
-   at the extension's copy instead of installing a second one; two versions building the same
-   project delete each other's build files ([#1](https://github.com/garamizo/inkboard/issues/1)).
-
-2. **Get the code:**
+2. **Get the code and run setup:**
 
    ```bash
    git clone https://github.com/garamizo/inkboard.git
    cd inkboard
+   just setup
    ```
 
-3. **Set your Wi-Fi credentials.** Copy the template (it is gitignored, so your password
-   never gets committed) and fill in `WIFI_SSID` and `WIFI_PASSWORD`:
+   `just setup` installs PlatformIO, creates `include/secrets.h` from its template, and on
+   Linux checks that you can open the serial port (it prints the `usermod` command if not).
+   If the VS Code PlatformIO extension is already installed, it reuses the extension's copy:
+   two PlatformIO versions building the same project delete each other's build files
+   ([#1](https://github.com/garamizo/inkboard/issues/1)).
 
-   ```bash
-   cp include/secrets.h.example include/secrets.h   # works in PowerShell too
-   ```
+3. **Set your Wi-Fi credentials:** fill in `WIFI_SSID` and `WIFI_PASSWORD` in
+   `include/secrets.h`. The file is gitignored, so your password never gets committed.
 
    Optional: set your location and layout in `FRAME_QUERY` in `include/config.h`
    (`lat`, `lon`, `tz`, `units`). Preview it at
@@ -83,19 +77,19 @@ The render server lives in `server/` (Python, served by Docker Compose). It is p
 through a Cloudflare Tunnel, so no router port is opened. You need Linux with Docker (Compose
 v2), git, just and uv.
 
-1. **Clone and test:**
+1. **Clone and run setup:**
 
    ```bash
    git clone https://github.com/garamizo/inkboard.git ~/inkboard
    cd ~/inkboard
-   just test            # server tests, no network needed
+   just setup-server
    ```
 
-2. **Create `server/.env`** from the template. It is gitignored; never commit it:
+   `just setup-server` checks for Docker Compose, installs the Python dependencies, creates
+   `server/.env` from `server/.env.example`, lists the keys that are still empty and runs the
+   server tests (no network needed).
 
-   ```bash
-   cp server/.env.example server/.env
-   ```
+2. **Fill in `server/.env`.** It is gitignored; never commit it.
 
    | Variable | Where to get it |
    |---|---|

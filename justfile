@@ -1,6 +1,6 @@
 # inkboard: firmware (PlatformIO) + render server (server/). `just` lists the recipes.
 
-# On Windows only `flash` and `monitor` are supported (PowerShell); the rest are for the Linux server.
+# On Windows only `setup`, `flash` and `monitor` are supported (PowerShell); the rest are for the Linux server.
 set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 
 public_url := "https://inkboard.signalwave.dev"
@@ -10,6 +10,58 @@ query := "w=market_trends:2/3,calendar_weather:1/3&lat=34.05&lon=-118.24&tz=Amer
 
 _default:
     @just --list --unsorted
+
+# First-time board setup: PlatformIO, include/secrets.h, serial port access. Needs git, just, uv.
+[linux]
+setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ide_pio="$HOME/.platformio/penv/bin/pio"
+    if command -v pio >/dev/null; then
+      echo "PlatformIO: $(pio --version)"
+    elif [[ -x "$ide_pio" ]]; then
+      # Reuse the VS Code extension's copy: two PlatformIO versions wipe each other's builds (#1).
+      mkdir -p ~/.local/bin
+      ln -sf "$ide_pio" ~/.local/bin/pio
+      ln -sf "$HOME/.platformio/penv/bin/platformio" ~/.local/bin/platformio
+      echo "PlatformIO: linked the VS Code extension's copy into ~/.local/bin"
+    else
+      uv tool install platformio
+    fi
+    if [[ -f include/secrets.h ]]; then
+      echo "Wi-Fi: include/secrets.h exists"
+    else
+      cp include/secrets.h.example include/secrets.h
+      echo "Wi-Fi: created include/secrets.h; put your network name and password in it"
+    fi
+    if id -nG | grep -qw dialout; then
+      echo "Serial: you are in the dialout group"
+    else
+      echo "Serial: run 'sudo usermod -aG dialout \$USER', then log out and back in"
+    fi
+
+# First-time board setup: PlatformIO, include/secrets.h. Needs git, just, uv.
+[windows]
+setup:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/setup.ps1
+
+# First-time server setup: checks Docker, installs Python deps, creates server/.env, runs tests.
+setup-server:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose version >/dev/null 2>&1 || { echo "Install Docker with the Compose plugin first." >&2; exit 1; }
+    (cd server && uv sync)
+    if [[ -f server/.env ]]; then
+      echo "server/.env exists"
+    else
+      cp server/.env.example server/.env
+      echo "created server/.env from server/.env.example"
+    fi
+    set -a; . server/.env; set +a
+    for name in FRED_API_KEY CLOUDFLARE_TUNNEL_TOKEN; do
+      [[ -n "${!name:-}" ]] || echo "still empty in server/.env: $name (see README)"
+    done
+    just test
 
 # Server tests; args go to pytest (e.g. `-k market`, `--update-goldens`).
 test *ARGS:
