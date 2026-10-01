@@ -209,14 +209,20 @@ void test_series_formats() {
 
 struct Recorder : ink::json::Handler {
   std::string log;
+  bool last_truncated = false;
+  bool last_closed_array = false;
   void scalar(const ink::json::Parser& p, ink::json::Type t, const char* text) override {
     for (int i = 0; i < p.depth(); ++i) {
       if (p.is_array(i)) log += "[" + std::to_string(p.index(i)) + "]";
       else log += std::string(".") + p.key(i);
     }
     log += "=" + std::to_string(static_cast<int>(t)) + ":" + text + ";";
+    last_truncated = p.truncated();
   }
-  void end_container(const ink::json::Parser& p) override { log += "end@" + std::to_string(p.depth()) + ";"; }
+  void end_container(const ink::json::Parser& p) override {
+    log += "end@" + std::to_string(p.depth()) + ";";
+    last_closed_array = p.closed_array();
+  }
 };
 
 static std::string parse_all(const std::string& doc, size_t chunk, bool* ok = nullptr) {
@@ -238,7 +244,9 @@ void test_json_paths_and_types() {
 void test_json_any_chunk_split_gives_same_events() {
   const std::string doc = R"( {"observations":[{"date":"2026-09-25","value":"6604.72"},{"date":"2026-09-26","value":"."}],
     "u":"\u00b0F \ud83d\ude00", "e":[], "o":{}} )";
-  const std::string whole = parse_all(doc, doc.size());
+  bool ok;
+  const std::string whole = parse_all(doc, doc.size(), &ok);
+  TEST_ASSERT_TRUE(ok);
   for (size_t chunk = 1; chunk < 9; ++chunk) TEST_ASSERT_EQUAL_STRING(whole.c_str(), parse_all(doc, chunk).c_str());
   TEST_ASSERT_NOT_EQUAL(std::string::npos, whole.find(".u=0:\xC2\xB0" "F \xF0\x9F\x98\x80;"));
 }
@@ -262,7 +270,9 @@ void test_json_long_strings_truncate_long_keys_fail() {
   std::string doc = "{\"m\":\"" + std::string(300, 'z') + "\"}";
   p.feed(doc.data(), doc.size());
   TEST_ASSERT_TRUE(p.finish());
-  TEST_ASSERT_NOT_EQUAL(std::string::npos, r.log.find(std::string(127, 'z') + ";"));
+  std::string expected = ".m=0:" + std::string(127, 'z') + ";end@0;";
+  TEST_ASSERT_EQUAL_STRING(expected.c_str(), r.log.c_str());
+  TEST_ASSERT_TRUE(r.last_truncated);
   bool ok = true;
   parse_all("{\"" + std::string(40, 'k') + "\":1}", 7, &ok);
   TEST_ASSERT_FALSE(ok);
@@ -280,6 +290,78 @@ void test_json_at_matches_paths() {
   p.feed(doc, strlen(doc));
   TEST_ASSERT_TRUE(p.finish());
   TEST_ASSERT_EQUAL_INT(2, h.hits);
+}
+
+void test_json_boundary_key_length() {
+  // Exactly 31 chars: accepted
+  bool ok = true;
+  parse_all("{\"" + std::string(31, 'k') + "\":1}", 100, &ok);
+  TEST_ASSERT_TRUE(ok);
+  // Exactly 32 chars: rejected
+  ok = true;
+  parse_all("{\"" + std::string(32, 'k') + "\":1}", 100, &ok);
+  TEST_ASSERT_FALSE(ok);
+}
+
+void test_json_boundary_string_length() {
+  // Exactly 127 chars: truncated() == false
+  Recorder r;
+  ink::json::Parser p(r);
+  std::string doc = "{\"s\":\"" + std::string(127, 'x') + "\"}";
+  p.feed(doc.data(), doc.size());
+  TEST_ASSERT_TRUE(p.finish());
+  TEST_ASSERT_FALSE(r.last_truncated);
+  // Exactly 128 chars: truncated() == true
+  Recorder r2;
+  ink::json::Parser p2(r2);
+  std::string doc2 = "{\"s\":\"" + std::string(128, 'x') + "\"}";
+  p2.feed(doc2.data(), doc2.size());
+  TEST_ASSERT_TRUE(p2.finish());
+  TEST_ASSERT_TRUE(r2.last_truncated);
+}
+
+void test_json_boundary_number_length() {
+  // Exactly 63 chars: accepted
+  bool ok = true;
+  parse_all(std::string(63, '9'), 100, &ok);
+  TEST_ASSERT_TRUE(ok);
+  // Exactly 64 chars: rejected
+  ok = true;
+  parse_all(std::string(64, '9'), 100, &ok);
+  TEST_ASSERT_FALSE(ok);
+}
+
+void test_json_boundary_nesting_depth() {
+  // Exactly 8 deep: accepted
+  std::string doc = "";
+  for (int i = 0; i < 8; ++i) doc += "[";
+  doc += "1";
+  for (int i = 0; i < 8; ++i) doc += "]";
+  bool ok = true;
+  parse_all(doc, 100, &ok);
+  TEST_ASSERT_TRUE(ok);
+}
+
+void test_json_closed_array_vs_object() {
+  struct H : ink::json::Handler {
+    std::string log;
+    void scalar(const ink::json::Parser&, ink::json::Type, const char*) override {}
+    void end_container(const ink::json::Parser& p) override {
+      log += p.closed_array() ? "a" : "o";
+    }
+  } h;
+  ink::json::Parser p(h);
+  const char* doc = R"([{},[]])";  // outer array, then object, then inner array
+  p.feed(doc, strlen(doc));
+  p.finish();
+  // Record: object closes (o), inner array closes (a), outer array closes (a)
+  TEST_ASSERT_EQUAL_STRING("oaa", h.log.c_str());
+}
+
+void test_json_rejects_escaped_nul() {
+  bool ok = true;
+  parse_all("{\"a\":\"x\\u0000y\"}", 10, &ok);
+  TEST_ASSERT_FALSE(ok);
 }
 
 int main() {
@@ -304,5 +386,11 @@ int main() {
   RUN_TEST(test_json_rejects_malformed);
   RUN_TEST(test_json_long_strings_truncate_long_keys_fail);
   RUN_TEST(test_json_at_matches_paths);
+  RUN_TEST(test_json_boundary_key_length);
+  RUN_TEST(test_json_boundary_string_length);
+  RUN_TEST(test_json_boundary_number_length);
+  RUN_TEST(test_json_boundary_nesting_depth);
+  RUN_TEST(test_json_closed_array_vs_object);
+  RUN_TEST(test_json_rejects_escaped_nul);
   return UNITY_END();
 }

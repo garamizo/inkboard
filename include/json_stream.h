@@ -224,6 +224,7 @@ class Parser {
       return fail();
     }
     hi_ = 0;
+    if (cp == 0) return fail();  // reject escaped NUL (would truncate C-strings)
     put_utf8(cp);
   }
 
