@@ -186,6 +186,7 @@ void test_query_errors_match_server() {
   TEST_ASSERT_EQUAL_STRING("tz: unknown timezone 'Nope/Zone'", qerr("w=market_trends:1&tz=Nope/Zone").c_str());
   TEST_ASSERT_EQUAL_STRING("tz: unknown timezone 'America'", qerr("w=market_trends:1&tz=America").c_str());
   TEST_ASSERT_EQUAL_STRING("malformed query string", qerr("w=market_trends:1&").c_str());
+  TEST_ASSERT_EQUAL_STRING("malformed query string", qerr("w=market_trends:1&w=market_trends:1&bad").c_str());
   TEST_ASSERT_EQUAL_STRING("malformed query string", qerr("w=market_trends:1%00junk").c_str());
   TEST_ASSERT_EQUAL_STRING("malformed query string", qerr("w=calendar_weather:1&lat=1&lon=1&units=metric%00x").c_str());
   std::string longq = "w=market_trends:1&" + std::string(1100, 'x');

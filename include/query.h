@@ -2,7 +2,9 @@
 // FRAME_QUERY -> Layout (spec §1.1). Port of server/inkboard_server/query.py and
 // widgets/params.py with the same one-line messages (they reach the config error screen).
 // Deviations: Python's float()/int() also accept "_" digit separators; these parsers don't.
-// A decoded NUL byte, a key over 31 bytes or a value over 255 bytes is "malformed query string".
+// A decoded NUL byte, a key over 31 bytes, a value over 255 bytes or more than 16 pairs is
+// "malformed query string". repr() only switches quote style; unlike Python it does not escape
+// backslashes or control characters. Scratch buffers are static: not reentrant.
 #include <ctype.h>
 #include <math.h>
 #include <stdint.h>
@@ -148,7 +150,7 @@ inline bool parse_query(const char* raw, Layout& out, char* error, size_t error_
   const size_t len = strlen(raw);
   if (len > MAX_QUERY_LEN) return err(error, error_n, "query longer than 1024 bytes"), false;
 
-  Pair pairs[MAX_PAIRS];
+  static Pair pairs[MAX_PAIRS];  // static: keeps ~4.6 KB off the stack; the firmware is single-threaded
   int n_pairs = 0;
   if (len > 0) {  // parse_qsl(strict_parsing=bool(raw), keep_blank_values=True)
     const char* p = raw;
@@ -160,13 +162,15 @@ inline bool parse_query(const char* raw, Layout& out, char* error, size_t error_
       if (!unquote(p, static_cast<size_t>(eq - p), pairs[n_pairs].key, sizeof pairs[n_pairs].key) ||
           !unquote(eq + 1, flen - static_cast<size_t>(eq + 1 - p), pairs[n_pairs].value, sizeof pairs[n_pairs].value))
         return err(error, error_n, "malformed query string"), false;
-      for (int i = 0; i < n_pairs; ++i)
-        if (strcmp(pairs[i].key, pairs[n_pairs].key) == 0)
-          return err(error, error_n, "%s: given more than once", pairs[n_pairs].key), false;
       ++n_pairs;
       if (!amp) break;
       p = amp + 1;
     }
+    // After the whole string parsed: query.py's strict parse_qsl rejects malformed input first.
+    for (int j = 1; j < n_pairs; ++j)
+      for (int i = 0; i < j; ++i)
+        if (strcmp(pairs[i].key, pairs[j].key) == 0)
+          return err(error, error_n, "%s: given more than once", pairs[j].key), false;
   }
   auto find = [&](const char* k) -> const char* {
     for (int i = 0; i < n_pairs; ++i)
@@ -267,7 +271,7 @@ inline bool parse_query(const char* raw, Layout& out, char* error, size_t error_
       if (ids > 4) return err(error, error_n, "series: give 1 to 4 ids"), false;
       // params.py order: count, uniqueness (on the raw strings), then the first unknown id.
       const char* p = s;
-      char raw_ids[4][MAX_TEXT];
+      static char raw_ids[4][MAX_TEXT];  // static for stack size, as pairs
       for (int i = 0; i < ids; ++i) {
         const char* comma = strchr(p, ',');
         const size_t n = comma ? static_cast<size_t>(comma - p) : strlen(p);
