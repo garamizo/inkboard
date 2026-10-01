@@ -3,6 +3,8 @@
 #include "../support/ink_test.h"
 #include "crc32.h"
 #include "render/png.h"
+#include "render/canvas.h"
+#include "prim_cases.h"
 
 void setUp() {}
 void tearDown() {}
@@ -22,9 +24,66 @@ void test_png_header_and_size() {
   TEST_ASSERT_EQUAL_UINT32(8 + 25 + 12 + 2 + 5 + 9 + 4 + 12, png.size());
 }
 
+static void replay(ink::View& v, const PrimOp& op) {
+  using ink::Pt;
+  const std::string k = op.kind;
+  if (k == "line") {
+    Pt pts[8];
+    for (int i = 0; i < op.n / 2; ++i) pts[i] = Pt{op.v[2 * i], op.v[2 * i + 1]};
+    v.line(pts, op.n / 2, op.fill, op.width);
+  } else if (k == "points") {
+    for (int x = int(op.v[0]); x < int(op.v[1]); x += int(op.v[2])) v.point(x, op.v[3], op.fill);
+  } else if (k == "rectangle") {
+    v.rectangle(op.v[0], op.v[1], op.v[2], op.v[3], op.fill, op.outline, op.width);
+  } else if (k == "ellipse") {
+    v.ellipse(op.v[0], op.v[1], op.v[2], op.v[3], op.fill, op.outline, op.width);
+  } else if (k == "polygon") {
+    Pt pts[8];
+    for (int i = 0; i < op.n / 2; ++i) pts[i] = Pt{op.v[2 * i], op.v[2 * i + 1]};
+    v.polygon(pts, op.n / 2, op.fill, op.outline, op.width);
+  } else if (k == "rounded_rectangle") {
+    v.rounded_rectangle(op.v[0], op.v[1], op.v[2], op.v[3], op.v[4], op.fill, op.outline, op.width);
+  } else {
+    TEST_FAIL_MESSAGE(op.kind);
+  }
+}
+
+void test_primitives_match_pillow() {
+  int failed = 0;
+  for (const PrimCase& c : PRIM_CASES) {
+    std::vector<uint8_t> bits(static_cast<size_t>((PRIM_W + 7) / 8) * PRIM_H);
+    ink::Bitmap bm(bits.data(), PRIM_W, PRIM_H);
+    bm.fill(ink::WHITE);
+    ink::View v(bm, ink::Box{0, 0, PRIM_W, PRIM_H});
+    for (int i = 0; i < c.n_ops; ++i) replay(v, c.ops[i]);
+    long diff = ink_test::match_reference((std::string("reference/primitives/") + c.name + ".pbm").c_str(),
+                                          bits.data(), PRIM_W, PRIM_H);
+    if (diff != 0) {
+      printf("primitive %s: %ld pixels differ (see test/reference/primitives/%s.pbm.cpp.png)\n", c.name, diff, c.name);
+      ++failed;
+    }
+  }
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, failed, "primitives differ from Pillow");
+}
+
+void test_view_clips_and_translates() {
+  std::vector<uint8_t> bits(static_cast<size_t>(10 / 8 + 1) * 10, 0xFF);
+  ink::Bitmap bm(bits.data(), 10, 10);
+  ink::View v(bm, ink::Box{2, 3, 4, 4});
+  v.rectangle(-5, -5, 50, 50, ink::BLACK);
+  for (int y = 0; y < 10; ++y)
+    for (int x = 0; x < 10; ++x)
+      TEST_ASSERT_EQUAL(x >= 2 && x < 6 && y >= 3 && y < 7, bm.is_black(x, y));
+  ink::View inner = v.sub(ink::Box{1, 1, 10, 10});  // clipped to the parent
+  TEST_ASSERT_EQUAL_INT(3, inner.w());
+  TEST_ASSERT_EQUAL_INT(3, inner.h());
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_crc32_known_value);
   RUN_TEST(test_png_header_and_size);
+  RUN_TEST(test_primitives_match_pillow);
+  RUN_TEST(test_view_clips_and_translates);
   return UNITY_END();
 }
