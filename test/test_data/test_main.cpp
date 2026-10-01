@@ -78,10 +78,12 @@ void test_format_python_compatible() {
 void test_tz_lookup() {
   TEST_ASSERT_EQUAL_STRING("PST8PDT,M3.2.0,M11.1.0", ink::tz::lookup("America/Los_Angeles"));
   TEST_ASSERT_NOT_NULL(ink::tz::lookup("UTC"));
+  TEST_ASSERT_NOT_NULL(ink::tz::lookup("America/Vancouver"));
   TEST_ASSERT_NULL(ink::tz::lookup("America"));
   TEST_ASSERT_NULL(ink::tz::lookup("../../etc/passwd"));
-  // Ramadan switches the footer rule cannot express: left out, so tz= with it is a config error.
-  TEST_ASSERT_NULL(ink::tz::lookup("Africa/Casablanca"));
+  // tzdata 2026c lists no Ramadan switches for Morocco (footer <+00>0), so it is expressible.
+  // An older tzdata leaves it out; the generator keeps any zone whose footer disagrees with zoneinfo out.
+  TEST_ASSERT_NOT_NULL(ink::tz::lookup("Africa/Casablanca"));
 }
 
 void test_tz_every_table_rule_parses() {

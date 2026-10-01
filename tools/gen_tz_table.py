@@ -5,6 +5,8 @@
 """IANA zone -> POSIX TZ rule for include/tz_table.h (spec §2.2), from the footer of each
 TZif file in the system tzdata, plus test/test_data/tz_cases.h with expected local times
 from Python's zoneinfo. Run: uv run tools/gen_tz_table.py
+The footer must be right from today on (zones that switched rules earlier, e.g. to permanent
+time, are fine); regenerate when tzdata changes.
 """
 import calendar
 import re
@@ -19,7 +21,8 @@ CASE_ZONES = ["UTC", "America/Los_Angeles", "America/New_York", "Europe/London",
               "Asia/Kathmandu", "Australia/Lord_Howe", "Australia/Sydney", "Pacific/Chatham",
               "America/Nuuk", "America/Sao_Paulo"]
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-CHECK_FROM, CHECK_TO = datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2030, 1, 1, tzinfo=timezone.utc)
+TODAY = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+CHECK_FROM, CHECK_TO = TODAY, TODAY + timedelta(days=4 * 365 + 1)
 NAME = r"(<[^>]*>|[A-Za-z]{3,})"
 OFFSET = r"([+-]?\d+(?::\d+){0,2})"
 RULE = re.compile(NAME + OFFSET + r"(?:" + NAME + OFFSET + r"?,([^,]+),([^,]+))?")
@@ -114,7 +117,7 @@ def main() -> None:
     rows = []
     for zname in CASE_ZONES:
         tz = zoneinfo.ZoneInfo(zname)
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        start = TODAY
         instants = set()
         prev = start.astimezone(tz).utcoffset()
         t = start
