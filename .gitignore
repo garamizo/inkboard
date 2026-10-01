@@ -4,3 +4,5 @@
 include/secrets.h
 *.pyc
 .superpowers/
+test/**/*.actual.png
+test/reference/**/*.cpp.png
