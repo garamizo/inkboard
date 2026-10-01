@@ -14,6 +14,7 @@
 #include "market_data.h"
 #include "sources/fred.h"
 #include "../fixtures/summaries.h"
+#include "data_cache.h"
 
 using namespace ink;
 
@@ -537,6 +538,146 @@ void test_y_range_and_ticks() {
   TEST_ASSERT_EQUAL_INT32(ink::days_from_civil(2024, 9, 27), ink::window_start_day(ink::days_from_civil(2026, 9, 27), 2));
 }
 
+using ink::SourceStatus;
+
+void test_due_rules() {
+  SourceStatus s;
+  TEST_ASSERT_TRUE(ink::is_due(s, 1000, 1800));             // never fetched
+  s.fetched_at = 1000;
+  TEST_ASSERT_FALSE(ink::is_due(s, 2799, 1800));
+  TEST_ASSERT_TRUE(ink::is_due(s, 2800, 1800));
+  s.retry_not_before = 3000;
+  TEST_ASSERT_FALSE(ink::is_due(s, 2900, 1800));            // spacing after a failure
+  TEST_ASSERT_TRUE(ink::is_due(s, 3000, 1800));
+}
+
+void test_due_when_clock_went_backwards() {
+  SourceStatus s;
+  s.fetched_at = 100000;
+  TEST_ASSERT_TRUE(ink::is_due(s, 99000, 1800));            // negative age: refetch rather than trust
+}
+
+void test_stale_rules() {
+  SourceStatus s;
+  s.fetched_at = 1000;
+  TEST_ASSERT_FALSE(ink::is_stale(s, 1000 + 1799, 1800));   // fresh is never stale (base.py)
+  s.last_attempt_failed = true;
+  TEST_ASSERT_FALSE(ink::is_stale(s, 1000 + 1799, 1800));
+  TEST_ASSERT_TRUE(ink::is_stale(s, 1000 + 1800, 1800));    // expired and the refresh failed
+  s.last_attempt_failed = false;
+  TEST_ASSERT_FALSE(ink::is_stale(s, 1000 + 1800 + 5399, 1800));
+  TEST_ASSERT_TRUE(ink::is_stale(s, 1000 + 1800 + 5400, 1800));
+}
+
+void test_record_failure_spacing() {
+  SourceStatus s;
+  ink::FetchResult r;
+  r.http_status = 503;
+  r.retry_after_s = 30;
+  ink::record_failure(s, r, 1000);
+  TEST_ASSERT_EQUAL_INT64(1300, s.retry_not_before);        // at least the 5-minute spacing
+  r.retry_after_s = 900;
+  ink::record_failure(s, r, 1000);
+  TEST_ASSERT_EQUAL_INT64(1900, s.retry_not_before);
+  TEST_ASSERT_TRUE(s.last_attempt_failed);
+  ink::record_success(s, 2000);
+  TEST_ASSERT_FALSE(s.last_attempt_failed);
+  TEST_ASSERT_EQUAL_INT64(2000, s.fetched_at);
+  TEST_ASSERT_EQUAL_INT64(0, s.retry_not_before);
+}
+
+void test_weather_key_mismatch_is_due() {
+  ink::WeatherCache c;
+  c.valid = true;
+  c.key = ink::WeatherKey{34.1, -118.2, false, "America/Los_Angeles"};
+  c.status.fetched_at = 1000;
+  ink::WeatherKey want = c.key;
+  TEST_ASSERT_FALSE(ink::weather_due(c, want, 1100));
+  TEST_ASSERT_TRUE(ink::weather_usable(c, want));
+  want.metric = true;
+  TEST_ASSERT_TRUE(ink::weather_due(c, want, 1100));
+  TEST_ASSERT_FALSE(ink::weather_usable(c, want));
+  want = c.key;
+  snprintf(want.tz, sizeof want.tz, "UTC");
+  TEST_ASSERT_TRUE(ink::weather_due(c, want, 1100));
+  ink::WeatherCache miss;                             // first boot: 429 with Retry-After, nothing cached
+  miss.key = c.key;
+  miss.status.retry_not_before = 5000;
+  TEST_ASSERT_FALSE(ink::weather_due(miss, c.key, 1100));
+  TEST_ASSERT_TRUE(ink::weather_due(miss, c.key, 5000));
+}
+
+static ink::SeriesCache g_sc, g_sc2;
+
+void test_encode_decode_roundtrip() {
+  g_sc = ink::SeriesCache{};
+  g_sc.valid = true;
+  snprintf(g_sc.fred_id, sizeof g_sc.fred_id, "SP500");
+  g_sc.data.n = 3;
+  g_sc.data.values[2] = 42.5;
+  static uint8_t buf[sizeof(ink::SeriesCache) + 64];
+  const size_t n = ink::encode_cache(ink::CacheKind::Series, g_sc, buf, sizeof buf);
+  TEST_ASSERT_EQUAL_size_t(sizeof(ink::SeriesCache) + ink::CACHE_HEADER_BYTES, n);
+  TEST_ASSERT_TRUE(ink::decode_cache(ink::CacheKind::Series, buf, n, g_sc2));
+  TEST_ASSERT_EQUAL_MEMORY(&g_sc, &g_sc2, sizeof g_sc);
+  TEST_ASSERT_EQUAL_size_t(0, ink::encode_cache(ink::CacheKind::Series, g_sc, buf, 100));  // too small
+}
+
+void test_decode_rejects_bad_crc() {
+  static uint8_t buf[sizeof(ink::SeriesCache) + 64];
+  const size_t n = ink::encode_cache(ink::CacheKind::Series, g_sc, buf, sizeof buf);
+  buf[n / 2] ^= 0x01;
+  TEST_ASSERT_FALSE(ink::decode_cache(ink::CacheKind::Series, buf, n, g_sc2));
+  buf[n / 2] ^= 0x01;
+  TEST_ASSERT_FALSE(ink::decode_cache(ink::CacheKind::Series, buf, n - 1, g_sc2));       // truncated
+  ink::WeatherCache w;
+  TEST_ASSERT_FALSE(ink::decode_cache(ink::CacheKind::Weather, buf, n, w));             // wrong kind
+}
+
+void test_plan_fred() {
+  const int32_t today = ink::days_from_civil(2026, 9, 30);
+  const int64_t now = int64_t(today) * 86400 + 36000;
+  ink::SeriesCache c;
+  ink::FredPlan p = ink::plan_fred(c, now, today, 5);
+  TEST_ASSERT_TRUE(p.kind == ink::FredFetch::Full);                  // nothing cached
+  TEST_ASSERT_EQUAL_INT32(ink::window_start_day(today, 5) - 62, p.observation_start);
+  const int32_t g0 = ink::first_sunday_on_or_after(ink::window_start_day(today, 5));
+  TEST_ASSERT_EQUAL_INT32(g0, p.keep_from);
+  c.valid = true;
+  c.data.first_sunday = g0;
+  c.data.n = static_cast<uint16_t>((today - g0) / 7 + 1);
+  c.data.covered_from = g0;
+  c.data.latest_date = today - 1;
+  c.full_fetched_at = now - 3600;
+  c.status.fetched_at = now - 3600;
+  TEST_ASSERT_TRUE(ink::plan_fred(c, now, today, 5).kind == ink::FredFetch::None);    // fresh
+  c.status.fetched_at = now - ink::FRED_TTL_S;
+  p = ink::plan_fred(c, now, today, 5);
+  TEST_ASSERT_TRUE(p.kind == ink::FredFetch::Tail);
+  TEST_ASSERT_EQUAL_INT(6, ink::weekday(p.s0));
+  TEST_ASSERT_TRUE(p.s0 <= today - 120 && p.s0 > today - 127);
+  TEST_ASSERT_EQUAL_INT32(p.s0 + 1, p.observation_start);
+  c.full_fetched_at = now - ink::FULL_REFETCH_S;
+  TEST_ASSERT_TRUE(ink::plan_fred(c, now, today, 5).kind == ink::FredFetch::Full);    // weekly full refresh
+  c.full_fetched_at = now - 3600;
+  c.status.retry_not_before = now + 10;
+  TEST_ASSERT_TRUE(ink::plan_fred(c, now, today, 5).kind == ink::FredFetch::None);    // spacing wins
+}
+
+void test_years_raised_needs_full() {
+  const int32_t today = ink::days_from_civil(2026, 9, 30);
+  const int64_t now = int64_t(today) * 86400;
+  ink::SeriesCache c;
+  c.valid = true;
+  const int32_t g5 = ink::first_sunday_on_or_after(ink::window_start_day(today, 5));
+  c.data.first_sunday = c.data.covered_from = g5;
+  c.data.n = 10;
+  c.data.latest_date = today;
+  c.full_fetched_at = c.status.fetched_at = now;
+  TEST_ASSERT_TRUE(ink::plan_fred(c, now, today, 5).kind == ink::FredFetch::None);
+  TEST_ASSERT_TRUE(ink::plan_fred(c, now, today, 10).kind == ink::FredFetch::Full);   // needs older Sundays
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_test_dir_is_absolute_and_readable);
@@ -575,5 +716,14 @@ int main() {
   RUN_TEST(test_dot_values_and_duplicates);
   RUN_TEST(test_fred_bad_key_detected);
   RUN_TEST(test_y_range_and_ticks);
+  RUN_TEST(test_due_rules);
+  RUN_TEST(test_due_when_clock_went_backwards);
+  RUN_TEST(test_stale_rules);
+  RUN_TEST(test_record_failure_spacing);
+  RUN_TEST(test_weather_key_mismatch_is_due);
+  RUN_TEST(test_encode_decode_roundtrip);
+  RUN_TEST(test_decode_rejects_bad_crc);
+  RUN_TEST(test_plan_fred);
+  RUN_TEST(test_years_raised_needs_full);
   return UNITY_END();
 }
