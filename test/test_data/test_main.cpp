@@ -9,6 +9,8 @@
 #include "tz.h"
 #include "tz_cases.h"
 #include "query.h"
+#include "sources/openmeteo.h"
+#include "../fixtures/fixtures.h"
 
 using namespace ink;
 
@@ -364,6 +366,57 @@ void test_json_rejects_escaped_nul() {
   TEST_ASSERT_FALSE(ok);
 }
 
+static bool parse_weather(const std::string& doc, size_t chunk, ink::Weather& w) {
+  ink::OpenMeteoParser h;
+  ink::json::Parser p(h);
+  for (size_t i = 0; i < doc.size(); i += chunk) p.feed(doc.data() + i, std::min(chunk, doc.size() - i));
+  return p.finish() && h.result(w);
+}
+
+void test_openmeteo_path() {
+  char b[400];
+  ink::openmeteo_path(b, sizeof b, 34.1, -118.2, false, "America/Los_Angeles");
+  TEST_ASSERT_EQUAL_STRING("/v1/forecast?latitude=34.1&longitude=-118.2&current=temperature_2m,weather_code"
+                           "&daily=weather_code,temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit"
+                           "&timezone=America%2FLos_Angeles&forecast_days=8", b);
+  ink::openmeteo_path(b, sizeof b, 0.0, 0.0, true, "UTC");
+  TEST_ASSERT_NOT_NULL(strstr(b, "temperature_unit=celsius&timezone=UTC&"));
+  ink::openmeteo_path(b, sizeof b, 0.0, 0.0, true, "Etc/GMT+5");
+  TEST_ASSERT_NOT_NULL(strstr(b, "timezone=Etc%2FGMT%2B5&"));
+}
+
+void test_openmeteo_fixture_any_chunking() {
+  std::string doc;
+  TEST_ASSERT_TRUE(ink_test::read_file(ink_test::path("fixtures/weather_la.json"), doc));
+  ink::Weather a, b;
+  TEST_ASSERT_TRUE(parse_weather(doc, doc.size(), a));
+  TEST_ASSERT_TRUE(parse_weather(doc, 7, b));
+  TEST_ASSERT_EQUAL_MEMORY(&a, &b, sizeof a);
+  TEST_ASSERT_EQUAL_UINT8(8, a.n_daily);
+  TEST_ASSERT_EQUAL_INT32(FIXTURE_TODAY, a.daily[0].day);
+  TEST_ASSERT_TRUE(a.temp > -60 && a.temp < 140);
+}
+
+void test_openmeteo_skips_null_rows_and_requires_current() {
+  ink::Weather w;
+  const std::string ok = R"({"current":{"temperature_2m":70.4,"weather_code":2},"daily":{
+    "time":["2026-09-27","2026-09-28","2026-09-29"],"weather_code":[0,null,3],
+    "temperature_2m_max":[80.0,81.0,82.5],"temperature_2m_min":[60.0,61.0]}})";
+  TEST_ASSERT_TRUE(parse_weather(ok, 5, w));
+  TEST_ASSERT_EQUAL_DOUBLE(70.4, w.temp);
+  TEST_ASSERT_EQUAL_INT16(2, w.code);
+  TEST_ASSERT_EQUAL_UINT8(1, w.n_daily);  // zip() stops at the shortest column; row 2 has a null code
+  TEST_ASSERT_EQUAL_DOUBLE(80.0, w.daily[0].hi);
+  TEST_ASSERT_FALSE(parse_weather(R"({"current":{"temperature_2m":null,"weather_code":2},"daily":{"time":[],
+    "weather_code":[],"temperature_2m_max":[],"temperature_2m_min":[]}})", 4, w));
+  TEST_ASSERT_FALSE(parse_weather(R"({"current":{"temperature_2m":1,"weather_code":2}})", 4, w));
+  TEST_ASSERT_FALSE(parse_weather(R"({"error":true,"reason":"Parameter 'latitude' is out of range"})", 4, w));
+  TEST_ASSERT_FALSE(parse_weather(R"({"current":{"temperature_2m":1,"weather_code":2},"daily":{"time":{},
+    "weather_code":{},"temperature_2m_max":{},"temperature_2m_min":{}}})", 4, w));  // objects, not arrays
+  TEST_ASSERT_FALSE(parse_weather(R"({"current":{"temperature_2m":1e400,"weather_code":2},"daily":{"time":[],
+    "weather_code":[],"temperature_2m_max":[],"temperature_2m_min":[]}})", 4, w));  // overflows to inf
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_test_dir_is_absolute_and_readable);
@@ -392,5 +445,8 @@ int main() {
   RUN_TEST(test_json_boundary_nesting_depth);
   RUN_TEST(test_json_closed_array_vs_object);
   RUN_TEST(test_json_rejects_escaped_nul);
+  RUN_TEST(test_openmeteo_path);
+  RUN_TEST(test_openmeteo_fixture_any_chunking);
+  RUN_TEST(test_openmeteo_skips_null_rows_and_requires_current);
   return UNITY_END();
 }
