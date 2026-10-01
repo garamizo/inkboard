@@ -10,6 +10,8 @@
 #include "../fixtures/fixtures.h"
 #include "json_stream.h"
 #include "widgets/calendar_weather.h"
+#include "sources/fred.h"
+#include "widgets/market_trends.h"
 
 
 void setUp() {}
@@ -100,6 +102,80 @@ void test_calendar_weather_matches_server() {
   }
 }
 
+// Fixture observations, optionally only those on or after `since` (the short-history scenario).
+struct ObsCollector : ink::json::Handler {
+  std::vector<std::pair<int32_t, double>> obs;
+  int32_t date = INT32_MIN;
+  std::string value;
+  void scalar(const ink::json::Parser& p, ink::json::Type, const char* s) override {
+    if (p.at({"observations", nullptr, "date"})) date = ink::parse_iso_date(s);
+    if (p.at({"observations", nullptr, "value"})) value = s;
+  }
+  void end_container(const ink::json::Parser& p) override {
+    if (p.at({"observations", nullptr})) {
+      if (value != "." && !value.empty()) obs.emplace_back(date, strtod(value.c_str(), nullptr));
+      value.clear();
+    }
+  }
+};
+
+static ink::SeriesData g_series[4];
+static ink::Summary g_sum[4];
+
+static void load_series(int slot, const char* fred_id, int32_t since = INT32_MIN) {
+  std::string doc;
+  TEST_ASSERT_TRUE(ink_test::read_file(ink_test::path((std::string("fixtures/fred_") + fred_id + "_full.json").c_str()), doc));
+  ObsCollector c;
+  ink::json::Parser p(c);
+  p.feed(doc.data(), doc.size());
+  TEST_ASSERT_TRUE(p.finish());
+  ink::SundayResampler r;
+  const int32_t g0 = ink::first_sunday_on_or_after(ink::window_start_day(FIXTURE_TODAY, 10));
+  r.begin_full(g_series[slot], g0, FIXTURE_TODAY);
+  for (auto& o : c.obs)
+    if (o.first >= since) r.add(o.first, o.second);
+  TEST_ASSERT_TRUE(r.finish(g0));
+}
+
+static ink::MarketPayload payload(const int* catalog_idx, int n) {
+  ink::MarketPayload p{n, {}, 5, FIXTURE_TODAY};
+  for (int i = 0; i < n; ++i) {
+    TEST_ASSERT_TRUE(ink::summarize(catalog_idx[i], g_series[i], FIXTURE_TODAY, 5, g_sum[i]));
+    p.series[i] = &g_sum[i];
+  }
+  return p;
+}
+
+static void render_market(const char* name, ink::Size size, const ink::MarketPayload& p) {
+  const int w = ink::size_width(size);
+  std::vector<uint8_t> bits(static_cast<size_t>((w + 7) / 8) * ink::WIDGET_H);
+  ink::Bitmap bm(bits.data(), w, ink::WIDGET_H);
+  bm.fill(ink::WHITE);
+  ink::View v(bm, ink::Box{0, 0, w, ink::WIDGET_H});
+  TEST_ASSERT_TRUE(ink::market_payload_ok(p));
+  ink::render_market_trends(v, size, p);
+  check_reference(name, bits.data(), w, ink::WIDGET_H);
+}
+
+void test_market_trends_matches_server() {
+  const char* ids[] = {"SP500", "CBBTCUSD", "MORTGAGE30US", "MEDLISPRI31080"};
+  for (int i = 0; i < 4; ++i) load_series(i, ids[i]);
+  const int idx[] = {0, 1, 2, 3};
+  const ink::MarketPayload p = payload(idx, 4);
+  render_market("market_trends_third", ink::Size::Third, p);
+  render_market("market_trends_two_thirds", ink::Size::TwoThirds, p);
+  render_market("market_trends_full", ink::Size::Full, p);
+}
+
+void test_market_trends_short_series() {
+  load_series(0, "SP500");
+  load_series(1, "MEDLISPRI31080", ink::days_from_civil(2024, 1, 1));
+  const int idx[] = {0, 3};
+  const ink::MarketPayload p = payload(idx, 2);
+  TEST_ASSERT_TRUE(g_sum[1].short_history);
+  render_market("market_trends_short_series", ink::Size::TwoThirds, p);
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_wmo_mapping);
@@ -107,5 +183,7 @@ int main() {
   RUN_TEST(test_marker_positions_and_y_at);
   RUN_TEST(test_weather_payload_picks_rows_by_date);
   RUN_TEST(test_calendar_weather_matches_server);
+  RUN_TEST(test_market_trends_matches_server);
+  RUN_TEST(test_market_trends_short_series);
   return UNITY_END();
 }
