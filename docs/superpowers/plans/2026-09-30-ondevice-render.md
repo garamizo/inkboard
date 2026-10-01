@@ -31,7 +31,7 @@
 - **Clock jumps after SNTP corrects a drifted RTC** (e.g. +40 min): cache ages, "updated" time and the next wake must use the corrected clock; no negative ages (an age < 0 counts as "due"). Test in Task 11 (`test_due_when_clock_went_backwards`).
 - **A wake that crosses local midnight between fetch and render**: the date used for rendering, the forecast row selection and the market grid's `today` must come from one `now` read after the network step. Test in Task 17 (`test_cycle_uses_one_now_after_network`).
 - **Config change across a reflash** (other `lat`, `units`, `tz`, more `years`, other series): old caches must not be shown as the new location's weather or under a different series. Tests in Task 11 (`test_weather_key_mismatch_is_due`, `test_years_raised_needs_full`), Task 15 (`test_weather_from_other_location_not_shown`) and Task 17 (`test_unconfigured_series_files_removed`).
-- **FRED response with observations out of order, duplicate dates, or a `"."` as the last value**: the result must equal the server's `summarize()` (which sorts and filters). Test in Task 10 (`test_resampler_rejects_unsorted`, `test_dot_values_and_duplicates`); a duplicate date keeps the larger value, as Python's sort of (date, value) pairs does.
+- **FRED response with duplicate dates, a `"."` as the last value, or observations out of order**: duplicates and missing values must give the server's `summarize()` result (a duplicate date keeps the larger value, as Python's sort of (date, value) pairs does). Out-of-order data is a deliberate deviation: the request sets `sort_order=asc`, and an unsorted response fails that refresh and keeps the cache (sorting would need the whole series in RAM). Tests in Task 10 (`test_resampler_rejects_unsorted`, `test_dot_values_and_duplicates`).
 - **LittleFS full or a cache file corrupted by a power cut mid-write**: a bad CRC means "no cache" for that file, never garbage on screen; a failed save keeps the board running from RAM. Tests in Task 11 (`test_decode_rejects_bad_crc`) and Task 17 (`test_save_failure_still_renders`).
 
 ---
@@ -193,10 +193,12 @@ static const char kRoots[] =
     "...\n"  // replace with the real PEM lines, one "...\n" string per line
     "-----END CERTIFICATE-----\n";
 
-static uint8_t g_frame[48000];                 // as in the dashboard: static, always resident
-static double g_series[4][530];                // 4 × MAX_POINTS doubles
+// ≈ the dashboard's static RAM: Work (frame, model, scratch, file buffer), four Summary, the
+// chart points and GxEPD2's page buffer (Tasks 15-18, ~115 KB). Touched in setup() so the
+// linker keeps it.
+static uint8_t g_resident[120 * 1024];
 RTC_NOINIT_ATTR static uint32_t g_magic;
-RTC_NOINIT_ATTR static int64_t g_synced_at;    // epoch of the last SNTP sync (0 = never)
+RTC_NOINIT_ATTR static uint32_t g_runs;        // boots since the spike was flashed
 
 static void heap(const char* tag) {
   Serial.printf("SPIKE heap_%s free=%u min=%u largest=%u stack_hwm=%u\n", tag,
@@ -235,11 +237,15 @@ static void get(NetworkClientSecure& c, HTTPClient& http, const String& url, con
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  memset(g_frame, 0xFF, sizeof g_frame);
-  for (auto& s : g_series) for (double& v : s) v = 1.0;
-  bool rtc_ok = g_magic == 0x5B1CE001;
-  Serial.printf("SPIKE reset_reason=%d rtc_magic_ok=%d now=%lld synced_at=%lld\n", (int)esp_reset_reason(),
-                rtc_ok, (long long)now_s(), rtc_ok ? (long long)g_synced_at : -1LL);
+  for (size_t i = 0; i < sizeof g_resident; ++i) g_resident[i] = static_cast<uint8_t>(i);
+  volatile uint32_t sum = 0;
+  for (size_t i = 0; i < sizeof g_resident; i += 512) sum += g_resident[i];
+  const bool rtc_ok = g_magic == 0x5B1CE001;
+  g_runs = rtc_ok ? g_runs + 1 : 0;
+  const int64_t boot_now = now_s();  // what the RTC-backed clock says before SNTP
+  const uint32_t boot_ms = millis();
+  Serial.printf("SPIKE run=%u reset_reason=%d rtc_magic_ok=%d now_before_sntp=%lld resident_sum=%u\n",
+                (unsigned)g_runs, (int)esp_reset_reason(), rtc_ok, (long long)boot_now, (unsigned)sum);
   heap("boot");
 
   // newlib POSIX TZ with an angle-bracket name (Lord Howe): does localtime_r handle it?
@@ -262,11 +268,12 @@ void setup() {
   t0 = millis();
   configTime(0, 0, "pool.ntp.org", "time.google.com");
   while (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED && millis() - t0 < 5000) delay(20);
-  int64_t before = now_s();
-  Serial.printf("SPIKE sntp_ms=%lu now=%lld drift_vs_rtc_s=%lld\n", millis() - t0, (long long)before,
-                rtc_ok && g_synced_at ? (long long)(before - g_synced_at) : 0LL);
+  // Drift = SNTP time minus what the clock said at boot (plus the time since boot). On a run
+  // whose clock was set before, |drift| < 5 s means this kind of reset kept system time.
+  const int64_t synced = now_s();
+  Serial.printf("SPIKE sntp_ms=%lu now=%lld drift_s=%lld\n", millis() - t0, (long long)synced,
+                (long long)(synced - (boot_now + (millis() - boot_ms) / 1000)));
   g_magic = 0x5B1CE001;
-  g_synced_at = before;
 
   NetworkClientSecure c;
   c.setCACert(kRoots);
@@ -289,7 +296,13 @@ void setup() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   Serial.printf("SPIKE awake_ms=%lu\n", millis());
-  Serial.println("SPIKE done: sleeping 60 s, then tap RESET once, then unplug/replug power once");
+  Serial.flush();
+  if (g_runs == 1) {  // the run after the first deep sleep: measure a software reset next
+    Serial.println("SPIKE software reset");
+    Serial.flush();
+    esp_restart();
+  }
+  Serial.println("SPIKE done: sleeping 60 s (then tap RESET once, then power-cycle once)");
   Serial.flush();
   esp_sleep_enable_timer_wakeup(60ULL * 1000000ULL);
   esp_deep_sleep_start();
@@ -309,9 +322,9 @@ Expected: `SUCCESS`. Note `RAM:` and `Flash:` usage from the output.
 
 Ask the user to plug the board in and confirm. Then run `pio run -e spike -t upload -t monitor` and capture the `SPIKE` lines across: the first boot, the timer wake after 60 s (reason 8 = deep sleep), a RESET tap, and a power cycle (unplug USB and battery, replug). Ask the user to do the RESET tap and power cycle at the right moments.
 
-Expected: four runs of `SPIKE` lines. Key questions to answer from them:
-- `heap_after_fred largest=` ≥ 30,000 and `min=` ≥ 40,000 → the budget holds. If not, Task 18 allocates the frame only after Wi-Fi is off (spec §7).
-- `reset_reason` and `drift_vs_rtc_s` per run: which reasons keep a valid `now` (|drift| < 5 s). Expected: deep sleep keeps time; power-on does not.
+Expected runs: 0 (first boot after flashing), 1 (deep-sleep wake), 2 (software reset), 3 (deep-sleep wake), 4 (RESET tap), 5 (power cycle). Key questions to answer from them:
+- `heap_after_fred largest=` ≥ 30,000 and `min=` ≥ 40,000 with the 120 KB resident block → the budget holds. If not, Task 18 allocates the frame only after Wi-Fi is off (spec §7).
+- `reset_reason` and `drift_s` per run from run 1 on: |drift_s| < 5 s means that kind of reset kept system time. Expected: deep sleep (8) and software reset (3) keep it; the RESET pin and power-on do not. Reasons not exercised here (panic, watchdogs) count as losing the clock.
 - `get_fred_tail_*` faster than the first FRED call → keep-alive works.
 - `newlib_tz_lordhowe` — informational only: the plan uses its own POSIX evaluator (Task 8).
 - `bytes=` of each request.
@@ -367,7 +380,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 In `platformio.ini`, replace the `[env:native]` `build_flags` line with:
 
 ```ini
-build_flags = -std=gnu++17 -Wall -Wextra -DINK_TEST_DIR=\"$PROJECT_DIR/test\"
+build_flags = -std=gnu++17 -Wall -Wextra -DUNITY_INCLUDE_DOUBLE -DINK_TEST_DIR=\"$PROJECT_DIR/test\"
 ```
 
 - [ ] **Step 2: Write the helper header**
@@ -453,7 +466,7 @@ Run: `pio test -e native`
 Expected: `test_logic`, `test_data`, `test_render` all PASSED. If `test_test_dir_is_absolute_and_readable` fails because `$PROJECT_DIR` was not expanded (the literal text `$PROJECT_DIR/test` appears), replace the flag with PlatformIO's dynamic form and rerun:
 
 ```ini
-build_flags = -std=gnu++17 -Wall -Wextra !python3 -c "import os; print('-DINK_TEST_DIR=\\\"' + os.getcwd() + '/test\\\"')"
+build_flags = -std=gnu++17 -Wall -Wextra -DUNITY_INCLUDE_DOUBLE !python3 -c "import os; print('-DINK_TEST_DIR=\\\"' + os.getcwd() + '/test\\\"')"
 ```
 
 - [ ] **Step 5: Commit**
@@ -823,8 +836,12 @@ inline std::vector<uint8_t> png_encode(const uint8_t* bits, int w, int h) {
 Append inside `namespace ink_test` (and add `#include "render/png.h"` at the top):
 
 ```cpp
+// Bit-for-bit double equality (Unity's DOUBLE asserts allow a relative tolerance).
+inline bool same_double(double a, double b) { return memcmp(&a, &b, sizeof a) == 0; }
+
 // Compare with test/goldens/<name>.png (byte-exact: png_encode is deterministic).
 inline void golden(const char* name, const uint8_t* bits, int w, int h) {
+  mkdir(path("goldens").c_str(), 0755);  // a clean checkout has no goldens yet
   const std::string p = path("goldens/") + name + ".png";
   const std::vector<uint8_t> png = ink::png_encode(bits, w, h);
   if (update_goldens()) {
@@ -887,7 +904,7 @@ inline long match_reference(const char* rel_pbm, const uint8_t* bits, int w, int
 }
 ```
 
-Also add `#include <ctype.h>` at the top.
+Also add `#include <ctype.h>` and `#include <sys/stat.h>` at the top. `UNITY_INCLUDE_DOUBLE` (Task 2's build flags) is required: without it Unity turns every `TEST_ASSERT_*_DOUBLE` into a failure.
 
 - [ ] **Step 9: Run all native tests**
 
@@ -1371,6 +1388,12 @@ TEXT_CASES = [  # (size, bold, text, anchor) - every anchor and the special char
     (36, True, "inkboard calibration", "mm"), (18, False, "AV Ty To WA", "la"),
 ]
 REF_W, REF_H, REF_X, REF_Y = 520, 90, 260, 45
+FRACTIONAL = [  # (size, bold, text, anchor, x, y): widgets place text at float positions
+    (13, False, "27", "mm", 260.5, 45.5), (15, True, "Thu", "lm", 264.0, 52.5),
+    (11, False, "1.5\u00d7", "rm", 259.75, 44.6), (11, False, "2024", "mt", 301.3, 40.0),
+    (15, False, "81\u00b0", "rm", 246.0, 52.5), (12, True, "S", "mm", 256.92857142857144, 56.0),
+    (18, False, "config office fluffy", "la", 20.0, 30.0),  # ligature probe, see Task 5 Step 6
+]
 
 
 def ttf(bold: bool) -> Path:
@@ -1412,11 +1435,11 @@ def font_header(size: int, bold: bool) -> str:
     for ch in CHARS:
         dx, dy, w, h, data = glyph(f, ch)
         assert w < 256 and h < 256, (name, ch)
-        glyphs.append((ord(ch), dx, dy, w, h, round(f.getlength(ch) * 64), len(bits)))
+        glyphs.append((ord(ch), dx, dy, w, h, round(f.getlength(ch, mode="1") * 64), len(bits)))
         bits += data
     kerns = []
     for a, b in product(CHARS, CHARS):
-        adj = round((f.getlength(a + b) - f.getlength(a) - f.getlength(b)) * 64)
+        adj = round((f.getlength(a + b, mode="1") - f.getlength(a, mode="1") - f.getlength(b, mode="1")) * 64)
         if adj:
             kerns.append((ord(a), ord(b), adj))
     glyphs.sort()
@@ -1450,22 +1473,24 @@ def main() -> None:
         "\n\nnamespace ink::fonts {\ninline constexpr const Font* ALL[] = {\n    " + lst + "};\n}  // namespace ink::fonts\n")
     REF.mkdir(parents=True, exist_ok=True)
     rows = []
-    for i, (size, bold, text, anchor) in enumerate(TEXT_CASES):
+    cases = [(s, b, t, a, REF_X, REF_Y) for s, b, t, a in TEXT_CASES] + FRACTIONAL
+    for i, (size, bold, text, anchor, x, y) in enumerate(cases):
         img = Image.new("L", (REF_W, REF_H), 255)
         d = ImageDraw.Draw(img)
         d.fontmode = "1"
-        d.text((REF_X, REF_Y), text, font=ImageFont.truetype(str(ttf(bold)), size), fill=0, anchor=anchor)
+        d.text((x, y), text, font=ImageFont.truetype(str(ttf(bold)), size), fill=0, anchor=anchor)
         img.point(lambda p: 255 if p > 140 else 0).convert("1").save(REF / f"case_{i:02d}.pbm")
         # Octal escapes for non-ASCII bytes: C++ hex escapes are greedy ("\xb0C" would be one escape).
         lit = "".join(chr(b) if 32 <= b < 127 and chr(b) not in '"\\' else "\\%03o" % b for b in text.encode())
-        rows.append('    {%d, %s, "%s", "%s", %r},' % (size, "true" if bold else "false", lit,
-                                                         anchor, ImageFont.truetype(str(ttf(bold)), size).getlength(text)))
+        rows.append('    {%d, %s, "%s", "%s", %r, %r, %r},' % (
+            size, "true" if bold else "false", lit, anchor,
+            ImageFont.truetype(str(ttf(bold)), size).getlength(text, mode="1"), float(x), float(y)))
     CASES_H.write_text(
         "#pragma once\n// Generated by tools/gen_fonts.py; do not edit.\n"
-        "struct TextCase { int size; bool bold; const char* text; const char* anchor; double length; };\n"
+        "struct TextCase { int size; bool bold; const char* text; const char* anchor; double length, x, y; };\n"
         f"static const int TEXT_W = {REF_W}, TEXT_H = {REF_H}, TEXT_X = {REF_X}, TEXT_Y = {REF_Y};\n"
         "static const TextCase TEXT_CASES[] = {\n" + "\n".join(rows) + "\n};\n")
-    print(f"wrote {len(names)} fonts, {len(TEXT_CASES)} text cases")
+    print(f"wrote {len(names)} fonts, {len(cases)} text cases")
 
 
 if __name__ == "__main__":
@@ -1473,7 +1498,7 @@ if __name__ == "__main__":
 ```
 
 Run: `uv run tools/gen_fonts.py`
-Expected: `wrote 20 fonts, 25 text cases`. Check sizes: `du -ch include/render/fonts/*.h | tail -1` (a few MB of source text is fine; the compiled data is much smaller).
+Expected: `wrote 20 fonts, 32 text cases`. Check sizes: `du -ch include/render/fonts/*.h | tail -1` (a few MB of source text is fine; the compiled data is much smaller).
 
 - [ ] **Step 3: Write the failing tests**
 
@@ -1506,7 +1531,7 @@ void test_text_matches_pillow() {
     ink::Bitmap bm(bits.data(), TEXT_W, TEXT_H);
     bm.fill(ink::WHITE);
     ink::View v(bm, ink::Box{0, 0, TEXT_W, TEXT_H});
-    ink::draw_text(v, TEXT_X, TEXT_Y, c.text, ink::font(c.size, c.bold), ink::BLACK, c.anchor);
+    ink::draw_text(v, c.x, c.y, c.text, ink::font(c.size, c.bold), ink::BLACK, c.anchor);
     char rel[64];
     snprintf(rel, sizeof rel, "reference/text/case_%02zu.pbm", i);
     long diff = ink_test::match_reference(rel, bits.data(), TEXT_W, TEXT_H);
@@ -1663,18 +1688,36 @@ Replace the comment block with the port. Note that `text_length` already passes 
 - [ ] **Step 6: Iterate until the text cases match**
 
 Run: `pio test -e native -f test_render`
-Expected at the end: `test_every_widget_font_exists`, `test_text_length_matches_pillow`, `test_text_matches_pillow` PASS (0 differing pixels in all 25 cases). Debug with `test/reference/text/case_NN.pbm.cpp.png` versus the `.pbm`.
+Expected at the end: `test_every_widget_font_exists`, `test_text_length_matches_pillow`, `test_text_matches_pillow` PASS (0 differing pixels in all 32 cases).
+
+Ligatures: raqm applies the font's `liga` feature, which this renderer does not reproduce. If the
+`config office fluffy` case differs only at fi/ff/fl, that is the cause. None of the server's widget
+strings contain those pairs (weather labels, day and month names, series labels, footer and table
+texts), and only the board's own config error screen ("config") is affected, which has no server
+reference. In that case delete the ligature case from `FRACTIONAL`, regenerate, and say so in the
+commit message. Any other difference is a placement bug. Debug with `test/reference/text/case_NN.pbm.cpp.png` versus the `.pbm`.
 
 If a case cannot reach 0 after porting the anchor math faithfully (e.g. raqm's sub-pixel positioning differs from the 64ths captured), stop and report the case and the pixel count to the user: the spec's acceptance is visual equivalence (spec §7), and the user decides whether a residual difference is acceptable.
 
 - [ ] **Step 7: Build for the board to check flash size**
 
-The firmware does not include the fonts until Task 18, so measure their compiled size with a scratch program:
+The firmware does not include the fonts until Task 18, so measure their compiled size with a scratch program that reads every bitmap byte (so none of it is optimized away):
 
 ```bash
 cat > /tmp/claude-1000/fontsize.cpp <<'EOF'
+#include <stdio.h>
 #include "render/font.h"
-int main() { int n = 0; for (const ink::Font* f : ink::fonts::ALL) n += f->n_glyphs; return n; }
+int main() {
+  unsigned long bytes = 0, sum = 0;
+  for (const ink::Font* f : ink::fonts::ALL)
+    for (int i = 0; i < f->n_glyphs; ++i) {
+      const ink::Glyph& g = f->glyphs[i];
+      const size_t n = size_t((g.w + 7) / 8) * g.h;
+      for (size_t k = 0; k < n; ++k) sum += f->bits[g.offset + k];
+      bytes += n;
+    }
+  printf("%lu bitmap bytes (checksum %lu)\n", bytes, sum);
+}
 EOF
 g++ -std=gnu++17 -O2 -Iinclude /tmp/claude-1000/fontsize.cpp -o /tmp/claude-1000/fontsize && size /tmp/claude-1000/fontsize
 ```
@@ -1730,8 +1773,10 @@ Create `tools/gen_tz_table.py`:
 TZif file in the system tzdata, plus test/test_data/tz_cases.h with expected local times
 from Python's zoneinfo. Run: uv run tools/gen_tz_table.py
 """
+import calendar
+import re
 import zoneinfo
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1739,8 +1784,63 @@ TABLE = ROOT / "include" / "tz_table.h"
 CASES = ROOT / "test" / "test_data" / "tz_cases.h"
 CASE_ZONES = ["UTC", "America/Los_Angeles", "America/New_York", "Europe/London", "Asia/Kolkata",
               "Asia/Kathmandu", "Australia/Lord_Howe", "Australia/Sydney", "Pacific/Chatham",
-              "America/Nuuk", "America/Sao_Paulo", "Africa/Casablanca"]
+              "America/Nuuk", "America/Sao_Paulo"]
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+CHECK_FROM, CHECK_TO = datetime(2026, 1, 1, tzinfo=timezone.utc), datetime(2030, 1, 1, tzinfo=timezone.utc)
+NAME = r"(<[^>]*>|[A-Za-z]{3,})"
+OFFSET = r"([+-]?\d+(?::\d+){0,2})"
+RULE = re.compile(NAME + OFFSET + r"(?:" + NAME + OFFSET + r"?,([^,]+),([^,]+))?")
+TRANS = re.compile(r"(?:M(\d+)\.(\d+)\.(\d+)|J(\d+)|(\d+))(?:/([+-]?\d+(?::\d+){0,2}))?")
+
+
+def hms(text: str) -> int:
+    sign = -1 if text.startswith("-") else 1
+    parts = [int(x) for x in text.lstrip("+-").split(":")] + [0, 0]
+    return sign * (parts[0] * 3600 + parts[1] * 60 + parts[2])
+
+
+def transition(spec: str, year: int) -> int:
+    """Seconds from the epoch to the local wall time of a POSIX transition (as include/tz.h)."""
+    m = TRANS.fullmatch(spec)
+    t = hms(m.group(6)) if m.group(6) else 7200
+    if m.group(1):
+        mon, week, wd = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        first = date(year, mon, 1)
+        d = first + timedelta(days=(wd - (first.weekday() + 1) % 7) % 7 + (week - 1) * 7)
+        while d.month != mon:
+            d -= timedelta(days=7)
+    elif m.group(4):
+        n = int(m.group(4))
+        d = date(year, 1, 1) + timedelta(days=n - 1 + (1 if calendar.isleap(year) and n >= 60 else 0))
+    else:
+        d = date(year, 1, 1) + timedelta(days=int(m.group(5)))
+    return (d - EPOCH.date()).days * 86400 + t
+
+
+def posix_offset(rule: str, t: int) -> int | None:
+    m = RULE.fullmatch(rule)
+    if not m:
+        return None
+    std = -hms(m.group(2))
+    if not m.group(3):
+        return std
+    dst = -hms(m.group(4)) if m.group(4) else std + 3600
+    y = (EPOCH + timedelta(seconds=t + std)).year
+    start, end = transition(m.group(5), y) - std, transition(m.group(6), y) - dst
+    in_dst = start <= t < end if start < end else not (end <= t < start)
+    return dst if in_dst else std
+
+
+def footer_matches(name: str, rule: str) -> bool:
+    """True if the footer rule gives zoneinfo's offsets over CHECK_FROM..CHECK_TO (3-hour steps).
+    False for zones with transitions the rule cannot express, e.g. Africa/Casablanca's Ramadan."""
+    tz = zoneinfo.ZoneInfo(name)
+    t = CHECK_FROM
+    while t < CHECK_TO:
+        if posix_offset(rule, int(t.timestamp())) != int(t.astimezone(tz).utcoffset().total_seconds()):
+            return False
+        t += timedelta(hours=3)
+    return True
 
 
 def footer(name: str) -> str | None:
@@ -1766,11 +1866,12 @@ def next_top_of_hour(now: datetime, tz) -> datetime:  # server/inkboard_server/s
 
 
 def main() -> None:
-    entries = []
+    entries, excluded = [], []
     for name in sorted(zoneinfo.available_timezones()):
         rule = footer(name)
-        if rule and not name.startswith(("posix/", "right/")) and name not in ("Factory", "localtime"):
-            entries.append((name, rule))
+        if not rule or name.startswith(("posix/", "right/")) or name in ("Factory", "localtime"):
+            continue
+        (entries if footer_matches(name, rule) else excluded).append((name, rule))
     body = "\n".join(f'    {{"{n}", "{r}"}},' for n, r in entries)
     TABLE.write_text(
         "#pragma once\n// Generated by tools/gen_tz_table.py from the system tzdata; do not edit.\n"
@@ -1805,7 +1906,8 @@ def main() -> None:
         "#include <stdint.h>\n"
         "struct TzCase { const char* zone; int64_t epoch; int32_t day; int hh, mm; int32_t offset; int64_t next_top; };\n"
         "static const TzCase TZ_CASES[] = {\n" + "\n".join(rows) + "\n};\n")
-    print(f"{len(entries)} zones, {len(rows)} cases")
+    print(f"{len(entries)} zones, {len(rows)} cases; left out (rules the footer cannot express): "
+          + ", ".join(n for n, _ in excluded))
 
 
 if __name__ == "__main__":
@@ -1813,7 +1915,7 @@ if __name__ == "__main__":
 ```
 
 Run: `uv run tools/gen_tz_table.py`
-Expected: something like `5xx zones, 3xxx cases`; `grep -c '"America/Los_Angeles", "PST8PDT,M3.2.0,M11.1.0"' include/tz_table.h` prints `1`.
+Expected: something like `5xx zones, 3xxx cases; left out (...): Africa/Casablanca, Africa/El_Aaiun`; `grep -c '"America/Los_Angeles", "PST8PDT,M3.2.0,M11.1.0"' include/tz_table.h` prints `1`.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -1828,6 +1930,8 @@ void test_tz_lookup() {
   TEST_ASSERT_NOT_NULL(ink::tz::lookup("UTC"));
   TEST_ASSERT_NULL(ink::tz::lookup("America"));
   TEST_ASSERT_NULL(ink::tz::lookup("../../etc/passwd"));
+  // Ramadan switches the footer rule cannot express: left out, so tz= with it is a config error.
+  TEST_ASSERT_NULL(ink::tz::lookup("Africa/Casablanca"));
 }
 
 void test_tz_every_table_rule_parses() {
@@ -1862,8 +1966,6 @@ void test_next_refresh_seconds_clamps() {
   TEST_ASSERT_EQUAL_INT32(300, ink::tz::next_refresh_seconds(r, ten_oclock + 3590));  // 10:59:50 -> 11:01 is 70 s, clamped
 }
 ```
-
-Note: if Africa/Casablanca's footer has no DST rule the generator still emits its cases; if its zoneinfo cases diverge because tzdata lists explicit future transitions not expressible in the footer (Casablanca's Ramadan switches), delete it from `CASE_ZONES` and note it in the generator's docstring as a known limitation of footer rules.
 
 Run: `pio test -e native -f test_data` → Expected: compile error (`tz.h` missing).
 
@@ -2179,6 +2281,8 @@ void test_query_errors_match_server() {
   TEST_ASSERT_EQUAL_STRING("tz: unknown timezone 'Nope/Zone'", qerr("w=market_trends:1&tz=Nope/Zone").c_str());
   TEST_ASSERT_EQUAL_STRING("tz: unknown timezone 'America'", qerr("w=market_trends:1&tz=America").c_str());
   TEST_ASSERT_EQUAL_STRING("malformed query string", qerr("w=market_trends:1&").c_str());
+  TEST_ASSERT_EQUAL_STRING("malformed query string", qerr("w=market_trends:1%00junk").c_str());
+  TEST_ASSERT_EQUAL_STRING("malformed query string", qerr("w=calendar_weather:1&lat=1&lon=1&units=metric%00x").c_str());
   std::string longq = "w=market_trends:1&" + std::string(1100, 'x');
   TEST_ASSERT_EQUAL_STRING("query longer than 1024 bytes", qerr(longq.c_str()).c_str());
 }
@@ -2258,7 +2362,8 @@ inline void format_value(ValueFmt f, double v, char* out, size_t n) {
 #pragma once
 // FRAME_QUERY -> Layout (spec §1.1). Port of server/inkboard_server/query.py and
 // widgets/params.py with the same one-line messages (they reach the config error screen).
-// Deviation: Python's float()/int() also accept "_" digit separators; these parsers don't.
+// Deviations: Python's float()/int() also accept "_" digit separators; these parsers don't.
+// A decoded NUL byte, a key over 31 bytes or a value over 255 bytes is "malformed query string".
 #include <ctype.h>
 #include <math.h>
 #include <stdint.h>
@@ -2316,16 +2421,23 @@ inline int hexval(char c) {
 }
 
 // urllib.parse.unquote_plus: '+' -> ' ', %XX decoded, malformed escapes kept verbatim.
-inline void unquote(const char* s, size_t n, char* out, size_t cap) {
+// false if the result holds a NUL byte or does not fit: a shortened value must never validate.
+inline bool unquote(const char* s, size_t n, char* out, size_t cap) {
   size_t k = 0;
-  for (size_t i = 0; i < n && k + 1 < cap; ++i) {
-    if (s[i] == '+') out[k++] = ' ';
-    else if (s[i] == '%' && i + 2 < n && hexval(s[i + 1]) >= 0 && hexval(s[i + 2]) >= 0) {
-      out[k++] = static_cast<char>(hexval(s[i + 1]) * 16 + hexval(s[i + 2]));
+  for (size_t i = 0; i < n; ++i) {
+    if (k + 1 >= cap) return false;
+    char c = s[i];
+    if (c == '+') {
+      c = ' ';
+    } else if (c == '%' && i + 2 < n && hexval(s[i + 1]) >= 0 && hexval(s[i + 2]) >= 0) {
+      c = static_cast<char>(hexval(s[i + 1]) * 16 + hexval(s[i + 2]));
       i += 2;
-    } else out[k++] = s[i];
+    }
+    if (c == '\0') return false;
+    out[k++] = c;
   }
   out[k] = '\0';
+  return true;
 }
 
 // Python repr() of a str, enough for these messages: single quotes unless the text has one.
@@ -2406,8 +2518,9 @@ inline bool parse_query(const char* raw, Layout& out, char* error, size_t error_
       const size_t flen = amp ? static_cast<size_t>(amp - p) : strlen(p);
       const char* eq = static_cast<const char*>(memchr(p, '=', flen));
       if (eq == nullptr || n_pairs == MAX_PAIRS) return err(error, error_n, "malformed query string"), false;
-      unquote(p, static_cast<size_t>(eq - p), pairs[n_pairs].key, sizeof pairs[n_pairs].key);
-      unquote(eq + 1, flen - static_cast<size_t>(eq + 1 - p), pairs[n_pairs].value, sizeof pairs[n_pairs].value);
+      if (!unquote(p, static_cast<size_t>(eq - p), pairs[n_pairs].key, sizeof pairs[n_pairs].key) ||
+          !unquote(eq + 1, flen - static_cast<size_t>(eq + 1 - p), pairs[n_pairs].value, sizeof pairs[n_pairs].value))
+        return err(error, error_n, "malformed query string"), false;
       for (int i = 0; i < n_pairs; ++i)
         if (strcmp(pairs[i].key, pairs[n_pairs].key) == 0)
           return err(error, error_n, "%s: given more than once", pairs[n_pairs].key), false;
@@ -2514,7 +2627,7 @@ inline bool parse_query(const char* raw, Layout& out, char* error, size_t error_
       for (const char* c = s; *c; ++c) ids += *c == ',';
       if (ids > 4) return err(error, error_n, "series: give 1 to 4 ids"), false;
       // params.py order: count, uniqueness (on the raw strings), then the first unknown id.
-      p = s;
+      const char* p = s;
       char raw_ids[4][MAX_TEXT];
       for (int i = 0; i < ids; ++i) {
         const char* comma = strchr(p, ',');
@@ -2596,6 +2709,7 @@ class Parser {
   int depth() const;
   bool is_array(int level) const; const char* key(int level) const; int32_t index(int level) const;
   bool truncated() const;                   // the last string value was cut at MAX_STRING
+  bool closed_array() const;                // in end_container(): the closed container was an array
   bool at(std::initializer_list<const char*> path) const;  // nullptr matches any array index
 };
 ```
@@ -2736,6 +2850,8 @@ class Parser {
   const char* key(int level) const { return frames_[level].key; }
   int32_t index(int level) const { return frames_[level].index; }
   bool truncated() const { return truncated_; }
+  // Inside end_container(): whether the container that just closed was an array.
+  bool closed_array() const { return frames_[depth_].array; }
 
   bool at(std::initializer_list<const char*> path) const {
     if (static_cast<int>(path.size()) != depth_) return false;
@@ -3218,6 +3334,8 @@ void test_openmeteo_path() {
                            "&timezone=America%2FLos_Angeles&forecast_days=8", b);
   ink::openmeteo_path(b, sizeof b, 0.0, 0.0, true, "UTC");
   TEST_ASSERT_NOT_NULL(strstr(b, "temperature_unit=celsius&timezone=UTC&"));
+  ink::openmeteo_path(b, sizeof b, 0.0, 0.0, true, "Etc/GMT+5");
+  TEST_ASSERT_NOT_NULL(strstr(b, "timezone=Etc%2FGMT%2B5&"));
 }
 
 void test_openmeteo_fixture_any_chunking() {
@@ -3246,6 +3364,10 @@ void test_openmeteo_skips_null_rows_and_requires_current() {
     "weather_code":[],"temperature_2m_max":[],"temperature_2m_min":[]}})", 4, w));
   TEST_ASSERT_FALSE(parse_weather(R"({"current":{"temperature_2m":1,"weather_code":2}})", 4, w));
   TEST_ASSERT_FALSE(parse_weather(R"({"error":true,"reason":"Parameter 'latitude' is out of range"})", 4, w));
+  TEST_ASSERT_FALSE(parse_weather(R"({"current":{"temperature_2m":1,"weather_code":2},"daily":{"time":{},
+    "weather_code":{},"temperature_2m_max":{},"temperature_2m_min":{}}})", 4, w));  // objects, not arrays
+  TEST_ASSERT_FALSE(parse_weather(R"({"current":{"temperature_2m":1e400,"weather_code":2},"daily":{"time":[],
+    "weather_code":[],"temperature_2m_max":[],"temperature_2m_min":[]}})", 4, w));  // overflows to inf
 }
 ```
 
@@ -3261,6 +3383,9 @@ Run: `pio test -e native -f test_data` → Expected: compile error (`sources/ope
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <ctype.h>
+#include <math.h>
 
 #include "civil.h"
 #include "json_stream.h"
@@ -3287,8 +3412,9 @@ inline void openmeteo_path(char* out, size_t n, double lat, double lon, bool met
   char tzq[128];
   size_t k = 0;
   for (const char* c = tz; *c && k + 4 < sizeof tzq; ++c) {
-    if (*c == '/') k += static_cast<size_t>(snprintf(tzq + k, sizeof tzq - k, "%%2F"));
-    else tzq[k++] = *c;  // IANA names are letters, digits, '_', '-', '+'
+    const unsigned char u = static_cast<unsigned char>(*c);
+    if (isalnum(u) || u == '_' || u == '-' || u == '.') tzq[k++] = *c;
+    else k += static_cast<size_t>(snprintf(tzq + k, sizeof tzq - k, "%%%02X", u));  // '/', and '+' in Etc/GMT+5
   }
   tzq[k] = '\0';
   snprintf(out, n,
@@ -3302,13 +3428,14 @@ class OpenMeteoParser : public json::Handler {
   void scalar(const json::Parser& p, json::Type t, const char* s) override {
     const bool num = t == json::Type::Number;
     if (p.at({"current", "temperature_2m"})) {
-      has_temp_ = num;
-      if (num) temp_ = strtod(s, nullptr);
+      temp_ = num ? strtod(s, nullptr) : NAN;
+      has_temp_ = isfinite(temp_);
       return;
     }
     if (p.at({"current", "weather_code"})) {
-      has_code_ = num;
-      if (num) code_ = static_cast<int16_t>(strtod(s, nullptr));
+      const double c = num ? strtod(s, nullptr) : -1;
+      has_code_ = c >= 0 && c <= 32767;  // WMO codes are 0-99; never cast garbage
+      code_ = static_cast<int16_t>(has_code_ ? c : 0);
       return;
     }
     if (p.depth() != 3 || p.is_array(1) || !p.is_array(2) || strcmp(p.key(0), "daily") != 0) return;
@@ -3316,15 +3443,19 @@ class OpenMeteoParser : public json::Handler {
     const int32_t i = p.index(2);
     if (col < 0 || i >= FORECAST_DAYS) return;
     if (i + 1 > len_[col]) len_[col] = i + 1;
-    ok_[col][i] = col == 0 ? t == json::Type::String : num;
-    if (col == 0) date_[i] = ok_[0][i] ? parse_iso_date(s) : INT32_MIN;
-    else if (num) val_[col][i] = strtod(s, nullptr);
+    if (col == 0) {
+      ok_[0][i] = t == json::Type::String;
+      date_[i] = ok_[0][i] ? parse_iso_date(s) : INT32_MIN;
+    } else {
+      val_[col][i] = num ? strtod(s, nullptr) : NAN;
+      ok_[col][i] = isfinite(val_[col][i]) && (col != 1 || (val_[col][i] >= 0 && val_[col][i] <= 32767));
+    }
   }
 
   void end_container(const json::Parser& p) override {
     if (p.depth() == 2 && strcmp(p.key(0), "daily") == 0 && !p.is_array(1)) {
       const int col = column(p.key(1));
-      if (col >= 0) seen_ |= 1 << col;
+      if (col >= 0 && p.closed_array()) seen_ |= 1 << col;
     }
   }
 
@@ -3458,7 +3589,7 @@ static ink::SeriesData g_full, g_base, g_merged;
 void test_fred_path() {
   char b[300];
   ink::fred_path(b, sizeof b, "SP500", "KEY", ink::days_from_civil(2016, 7, 30));
-  TEST_ASSERT_EQUAL_STRING("/fred/series/observations?series_id=SP500&api_key=KEY&file_type=json&observation_start=2016-07-30", b);
+  TEST_ASSERT_EQUAL_STRING("/fred/series/observations?series_id=SP500&api_key=KEY&file_type=json&sort_order=asc&observation_start=2016-07-30", b);
 }
 
 void test_resampler_matches_python_summaries() {
@@ -3473,15 +3604,15 @@ void test_resampler_matches_python_summaries() {
     static ink::Summary s;
     TEST_ASSERT_TRUE(ink::summarize(0, g_full, FIXTURE_TODAY, e.years, s));
     TEST_ASSERT_EQUAL_INT_MESSAGE(e.n, s.n, e.fred_id);
-    TEST_ASSERT_EQUAL_DOUBLE(e.last, s.last);
-    TEST_ASSERT_EQUAL_DOUBLE(e.ratio, s.ratio);      // same summation order: bit-exact
+    TEST_ASSERT_TRUE_MESSAGE(ink_test::same_double(e.last, s.last), e.fred_id);
+    TEST_ASSERT_TRUE_MESSAGE(ink_test::same_double(e.ratio, s.ratio), e.fred_id);  // same summation order
     TEST_ASSERT_EQUAL(e.has_yoy, s.has_yoy);
-    if (e.has_yoy) TEST_ASSERT_EQUAL_DOUBLE(e.yoy, s.yoy);
+    if (e.has_yoy) TEST_ASSERT_TRUE_MESSAGE(ink_test::same_double(e.yoy, s.yoy), e.fred_id);
     TEST_ASSERT_EQUAL_INT32(e.last_date, s.last_date);
     TEST_ASSERT_EQUAL_INT32(e.window_start, s.window_start);
     TEST_ASSERT_EQUAL(e.short_history, s.short_history);
-    TEST_ASSERT_EQUAL_DOUBLE(e.first_norm, s.norm[0]);
-    TEST_ASSERT_EQUAL_DOUBLE(e.last_norm, s.norm[s.n - 1]);
+    TEST_ASSERT_TRUE_MESSAGE(ink_test::same_double(e.first_norm, s.norm[0]), e.fred_id);
+    TEST_ASSERT_TRUE_MESSAGE(ink_test::same_double(e.last_norm, s.norm[s.n - 1]), e.fred_id);
   }
 }
 
@@ -3585,7 +3716,7 @@ constexpr const char* FRED_HOST = "api.stlouisfed.org";
 
 inline void fred_path(char* out, size_t n, const char* fred_id, const char* api_key, int32_t observation_start) {
   const Ymd d = civil_from_days(observation_start);
-  snprintf(out, n, "/fred/series/observations?series_id=%s&api_key=%s&file_type=json&observation_start=%04d-%02d-%02d",
+  snprintf(out, n, "/fred/series/observations?series_id=%s&api_key=%s&file_type=json&sort_order=asc&observation_start=%04d-%02d-%02d",
            fred_id, api_key, d.y, d.m, d.d);
 }
 
@@ -3972,6 +4103,11 @@ void test_weather_key_mismatch_is_due() {
   want = c.key;
   snprintf(want.tz, sizeof want.tz, "UTC");
   TEST_ASSERT_TRUE(ink::weather_due(c, want, 1100));
+  ink::WeatherCache miss;                             // first boot: 429 with Retry-After, nothing cached
+  miss.key = c.key;
+  miss.status.retry_not_before = 5000;
+  TEST_ASSERT_FALSE(ink::weather_due(miss, c.key, 1100));
+  TEST_ASSERT_TRUE(ink::weather_due(miss, c.key, 5000));
 }
 
 static ink::SeriesCache g_sc, g_sc2;
@@ -4145,8 +4281,9 @@ struct SeriesCache {
 inline bool weather_usable(const WeatherCache& c, const WeatherKey& want) { return c.valid && same_key(c.key, want); }
 
 inline bool weather_due(const WeatherCache& c, const WeatherKey& want, int64_t now) {
-  if (!weather_usable(c, want)) return true;
-  return is_due(c.status, now, WEATHER_TTL_S);
+  if (!same_key(c.key, want)) return true;            // another location: its old spacing does not apply
+  if (now < c.status.retry_not_before) return false;  // also for a key that never succeeded (base.py miss failures)
+  return !c.valid || is_due(c.status, now, WEATHER_TTL_S);
 }
 
 enum class FredFetch : uint8_t { None, Full, Tail };
@@ -5600,7 +5737,7 @@ Expected: PASS. `screen_default`, `screen_stale`, `screen_nodata` and `screen_re
 - [ ] **Step 5: Commit**
 
 ```bash
-git add include/compositor.h include/model.h test/goldens/screen_*.png test/test_widgets/test_main.cpp
+git add include/compositor.h include/model.h test/goldens/screen_*.png test/goldens/calibration.png test/test_widgets/test_main.cpp
 git commit -m "Render: compositor, footer, config error and calibration screens
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -5625,7 +5762,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 [env:preview]
 platform = native
 build_src_filter = -<*> +<../tools/preview/>
-build_flags = -std=gnu++17 -Wall -Wextra -DINK_TEST_DIR=\"$PROJECT_DIR/test\"
+build_flags = -std=gnu++17 -Wall -Wextra -DUNITY_INCLUDE_DOUBLE -DINK_TEST_DIR=\"$PROJECT_DIR/test\"
 ```
 
 (Use the same `INK_TEST_DIR` form that Task 2 settled on.)
@@ -5820,7 +5957,7 @@ int32_t remaining_sleep_s(int32_t ms_left);                           // unchang
 // cycle.h (namespace wake)
 constexpr uint32_t NETWORK_BUDGET_MS = 45000, WIFI_TIMEOUT_MS = 15000, SNTP_TIMEOUT_MS = 5000, FRED_MIN_LEFT_MS = 8000;
 struct Work { uint8_t frame[ink::FRAME_BYTES]; ink::Model model; ink::SeriesData scratch;
-              uint8_t file[sizeof(ink::SeriesCache) + ink::CACHE_HEADER_BYTES]; };
+              uint8_t file[sizeof(ink::SeriesCache) + ink::CACHE_HEADER_BYTES]; bool loaded; };
 template <class Ops> bool show_if_changed(Ops& ops, Rtc& rtc, const uint8_t* frame);
 template <class Ops> int32_t run_cycle(Ops& ops, Rtc& rtc, Work& w, const char* frame_query, const char* version,
                                        bool calibration, int32_t fallback_s);
@@ -5945,7 +6082,9 @@ Replace `test/test_logic/test_main.cpp` with:
 
 using namespace wake;
 
-void setUp() {}
+static Work g_work;  // shared by the cycle tests: a fresh boot before each test
+
+void setUp() { g_work = Work{}; }
 void tearDown() {}
 
 static const char* kQuery =
@@ -6028,8 +6167,6 @@ struct FakeOps {
   const char* fred_api_key() { return "TESTKEY"; }
   void log(const char*) {}
 };
-
-static Work g_work;
 
 static Rtc cold() {
   Rtc r{};
@@ -6209,6 +6346,11 @@ void test_no_filesystem_runs_from_ram() {
   cycle(ops, rtc);
   TEST_ASSERT_EQUAL_INT(1, ops.shows);
   TEST_ASSERT_EQUAL_size_t(0, ops.files.size());
+  ops.wifi_ok = false;                // still awake (USB): the next cycle keeps the RAM data
+  ops.clock += 3600;
+  cycle(ops, rtc);
+  TEST_ASSERT_TRUE(g_work.model.weather.valid);
+  TEST_ASSERT_EQUAL_INT(1, ops.shows);  // same frame, not "No data yet"
 }
 
 void test_dirty_panel_redraws_same_frame() {
@@ -6295,6 +6437,7 @@ struct Work {
   ink::Model model;
   ink::SeriesData scratch;  // a FRED response is resampled into this, then committed
   uint8_t file[sizeof(ink::SeriesCache) + ink::CACHE_HEADER_BYTES];
+  bool loaded;  // caches read from flash since boot
 };
 
 // Mark dirty, draw, then record what is shown: a reset mid-refresh leaves the panel dirty
@@ -6332,8 +6475,12 @@ void save_series(Ops& ops, Work& w, int i, bool fs) {
   if (n == 0 || !ops.save(name, w.file, n)) ops.log("store: series not saved");
 }
 
+// Flash is read once per boot: while the board stays awake (USB, dev builds) RAM is newer,
+// e.g. after a fetch whose save failed.
 template <class Ops>
 void load_caches(Ops& ops, Work& w, bool fs) {
+  if (w.loaded) return;
+  w.loaded = true;
   ink::Model& m = w.model;
   m.weather = ink::WeatherCache{};
   for (auto& s : m.series) s = ink::SeriesCache{};
@@ -6660,9 +6807,9 @@ bool store_save(const char* name, const uint8_t* data, size_t len) {
     LittleFS.remove(tmp);
     return false;
   }
-  if (!LittleFS.rename(tmp, path)) {
-    LittleFS.remove(path);
-    if (!LittleFS.rename(tmp, path)) return false;
+  if (!LittleFS.rename(tmp, path)) {  // LittleFS renames over an existing file; keep the good copy
+    LittleFS.remove(tmp);
+    return false;
   }
   return true;
 }
@@ -6720,13 +6867,17 @@ void net_close();
 #include "secrets.h"
 #include "wake_logic.h"
 
-// Feeds the body straight into the JSON tokenizer, so nothing is buffered (spec §2.6).
+// Feeds the body straight into the JSON tokenizer, so nothing is buffered (spec §2.6), and
+// enforces the wake's deadline: a short write makes writeToStream() stop with an error.
 // writeToStream() wants a Stream; only the write side is used.
 class ParserSink : public Stream {
  public:
-  explicit ParserSink(ink::json::Parser& p) : p_(p) {}
-  size_t write(uint8_t c) override { return p_.feed(reinterpret_cast<const char*>(&c), 1) ? 1 : 0; }
-  size_t write(const uint8_t* b, size_t n) override { return p_.feed(reinterpret_cast<const char*>(b), n) ? n : 0; }
+  ParserSink(ink::json::Parser& p, uint32_t deadline_ms) : p_(p), deadline_(deadline_ms) {}
+  size_t write(uint8_t c) override { return write(&c, 1); }
+  size_t write(const uint8_t* b, size_t n) override {
+    if (static_cast<int32_t>(millis() - deadline_) >= 0) return 0;
+    return p_.feed(reinterpret_cast<const char*>(b), n) ? n : 0;
+  }
   int available() override { return 0; }
   int read() override { return -1; }
   int peek() override { return -1; }
@@ -6734,9 +6885,14 @@ class ParserSink : public Stream {
 
  private:
   ink::json::Parser& p_;
+  uint32_t deadline_;
 };
 
+// One TLS client and one HTTPClient per host, kept across requests so the FRED series share a
+// keep-alive session. HTTPClient's destructor calls stop() on its client, so the HTTPClient
+// must outlive every request and be destroyed before the client.
 static NetworkClientSecure* g_client = nullptr;
+static HTTPClient* g_http = nullptr;
 static String g_host;
 
 bool net_wifi_up(uint32_t timeout_ms) {
@@ -6751,11 +6907,10 @@ bool net_wifi_up(uint32_t timeout_ms) {
 }
 
 void net_close() {
-  if (g_client) {
-    g_client->stop();
-    delete g_client;
-    g_client = nullptr;
-  }
+  delete g_http;  // stops the connection through g_client, which is still alive here
+  g_http = nullptr;
+  delete g_client;
+  g_client = nullptr;
   g_host = "";
 }
 
@@ -6782,33 +6937,37 @@ void net_set_clock(int64_t epoch) {
 
 ink::FetchResult net_get(const char* host, const char* path, ink::json::Handler& h, uint32_t timeout_ms) {
   ink::FetchResult r;
-  if (g_client == nullptr || g_host != host) {  // the FRED series share one TLS session
+  const uint32_t deadline = millis() + timeout_ms;
+  if (g_client == nullptr || g_host != host) {
     net_close();
     g_client = new NetworkClientSecure;
     g_client->setCACert(CA_BUNDLE_PEM);
-    g_client->setHandshakeTimeout(10);
+    g_http = new HTTPClient;
+    g_http->setReuse(true);
+    g_http->setUserAgent("inkboard/" INKBOARD_VERSION);
     g_host = host;
   }
-  HTTPClient http;
-  http.setReuse(true);
-  http.setConnectTimeout(8000);
-  http.setTimeout(timeout_ms < 10000 ? timeout_ms : 10000);
-  http.setUserAgent("inkboard/" INKBOARD_VERSION);
+  // Connect, TLS and each wait for data are bounded by what is left of the budget (at most
+  // 8/10/10 s); the body as a whole by the deadline in ParserSink.
+  const uint32_t step = timeout_ms < 10000 ? timeout_ms : 10000;
+  g_client->setHandshakeTimeout(step >= 1000 ? step / 1000 : 1);
+  g_http->setConnectTimeout(step < 8000 ? step : 8000);
+  g_http->setTimeout(step);
   static const char* keys[] = {"Date", "Retry-After"};
-  http.collectHeaders(keys, 2);
-  if (!http.begin(*g_client, host, 443, path, true)) return r;
-  r.http_status = http.GET();
-  r.date_epoch = httptime::parse_http_date(http.header("Date").c_str());
-  r.retry_after_s = wake::parse_seconds(http.header("Retry-After").c_str());
+  g_http->collectHeaders(keys, 2);
+  if (!g_http->begin(*g_client, host, 443, path, true)) return r;
+  r.http_status = g_http->GET();
+  r.date_epoch = httptime::parse_http_date(g_http->header("Date").c_str());
+  r.retry_after_s = wake::parse_seconds(g_http->header("Retry-After").c_str());
   if (r.http_status == 200 || r.http_status == 400 || r.http_status == 403) {  // 4xx bodies explain a bad key
     ink::json::Parser p(h);
-    ParserSink sink(p);
-    const int size = http.getSize();
-    const int written = http.writeToStream(&sink);
+    ParserSink sink(p, deadline);
+    const int size = g_http->getSize();
+    const int written = g_http->writeToStream(&sink);
     r.complete = written >= 0 && (size < 0 || written == size) && p.finish();
   }
-  http.end();
-  if (r.http_status < 0) net_close();  // a broken session must not be reused
+  g_http->end();
+  if (!r.complete) net_close();  // a broken or half-read session must not be reused
   return r;
 }
 ```
@@ -6895,15 +7054,12 @@ struct BoardOps {
 
 static BoardOps g_ops;
 
-// Which resets keep the RTC-backed system time (measured in plan Task 1, spec §8).
+// Which resets keep the RTC-backed system time (measured in plan Task 1, spec §8). Resets
+// that were not measured count as losing it: an SNTP sync is cheaper than a wrong date.
 static bool clock_survives(esp_reset_reason_t r) {
   switch (r) {
     case ESP_RST_DEEPSLEEP:
     case ESP_RST_SW:
-    case ESP_RST_PANIC:
-    case ESP_RST_INT_WDT:
-    case ESP_RST_TASK_WDT:
-    case ESP_RST_WDT:
       return true;
     default:
       return false;
