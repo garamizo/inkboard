@@ -85,8 +85,8 @@ its Docker/Cloudflare deployment and `inkboard.signalwave.dev` go away.
 
 ### 2.1 Clock (`clock.h`, `net.cpp`)
 
-1. Each wake that brings Wi-Fi up runs SNTP (`pool.ntp.org`, 5 s timeout). If SNTP fails, the `Date` header of
-   any successful HTTPS response in this wake sets the clock.
+1. Each wake that brings Wi-Fi up runs SNTP (`pool.ntp.org`, 5 s timeout). If SNTP fails and the clock is not
+   valid, the `Date` header of a tiny Open-Meteo request sets it.
 2. The clock is valid only if it was synced since the last power-on or chip reset: `clock_valid` lives in
    RTC memory (`RTC_NOINIT_ATTR`, magic-checked) and is cleared on a magic mismatch or a reset reason that
    resets the RTC timer. Phase 1 verifies on hardware which reset reasons keep system time.
@@ -161,7 +161,9 @@ Persisted with each cache: `fetched_at` (last success), `last_attempt_failed`, `
 (`Retry-After` on 429/503), `auth_rejected` (FRED 400/403 with an api_key error).
 
 - **Due:** past TTL (or key/coverage change) and past `retry_not_before`.
-- **Stale:** `last_attempt_failed`, or older than TTL + 90 min (the server rule).
+- **Stale:** never within the TTL; past it, stale if the last attempt failed or the data is older than
+  TTL + 90 min (the server rule). A wake whose Wi-Fi did not connect does not mark sources failed (they
+  were never asked), so a board offline for less than 2 h keeps its frame (§4.4).
 - **Footer:** "updated h:mm AM" = newest `fetched_at` among visible widgets with data, in the local tz;
   `⚠ stale` if any visible widget's sources are stale; the firmware version; attributions deduplicated in
   widget order, as `compositor.py` does.
