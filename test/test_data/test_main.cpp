@@ -11,6 +11,9 @@
 #include "query.h"
 #include "sources/openmeteo.h"
 #include "../fixtures/fixtures.h"
+#include "market_data.h"
+#include "sources/fred.h"
+#include "../fixtures/summaries.h"
 
 using namespace ink;
 
@@ -417,6 +420,122 @@ void test_openmeteo_skips_null_rows_and_requires_current() {
     "weather_code":[],"temperature_2m_max":[],"temperature_2m_min":[]}})", 4, w));  // overflows to inf
 }
 
+static bool feed_fred(const char* file, ink::SundayResampler& r, size_t chunk, ink::FredParser** out_parser = nullptr) {
+  std::string doc;
+  TEST_ASSERT_TRUE_MESSAGE(ink_test::read_file(ink_test::path(file), doc), file);
+  static ink::FredParser* keep = nullptr;
+  delete keep;
+  keep = new ink::FredParser(r);
+  ink::json::Parser p(*keep);
+  for (size_t i = 0; i < doc.size(); i += chunk) p.feed(doc.data() + i, std::min(chunk, doc.size() - i));
+  if (out_parser) *out_parser = keep;
+  return p.finish() && keep->saw_observations();
+}
+
+static ink::SeriesData g_full, g_base, g_merged;
+
+void test_fred_path() {
+  char b[300];
+  ink::fred_path(b, sizeof b, "SP500", "KEY", ink::days_from_civil(2016, 7, 30));
+  TEST_ASSERT_EQUAL_STRING("/fred/series/observations?series_id=SP500&api_key=KEY&file_type=json&sort_order=asc&observation_start=2016-07-30", b);
+}
+
+void test_resampler_matches_python_summaries() {
+  for (const SummaryExpect& e : SUMMARIES) {
+    char file[64];
+    snprintf(file, sizeof file, "fixtures/fred_%s_full.json", e.fred_id);
+    ink::SundayResampler r;
+    const int32_t g0 = ink::first_sunday_on_or_after(ink::window_start_day(FIXTURE_TODAY, 10));
+    r.begin_full(g_full, g0, FIXTURE_TODAY);
+    TEST_ASSERT_TRUE(feed_fred(file, r, 4096));
+    TEST_ASSERT_TRUE(r.finish(g0));
+    static ink::Summary s;
+    TEST_ASSERT_TRUE(ink::summarize(0, g_full, FIXTURE_TODAY, e.years, s));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(e.n, s.n, e.fred_id);
+    TEST_ASSERT_TRUE_MESSAGE(ink_test::same_double(e.last, s.last), e.fred_id);
+    TEST_ASSERT_TRUE_MESSAGE(ink_test::same_double(e.ratio, s.ratio), e.fred_id);  // same summation order
+    TEST_ASSERT_EQUAL(e.has_yoy, s.has_yoy);
+    if (e.has_yoy) TEST_ASSERT_TRUE_MESSAGE(ink_test::same_double(e.yoy, s.yoy), e.fred_id);
+    TEST_ASSERT_EQUAL_INT32(e.last_date, s.last_date);
+    TEST_ASSERT_EQUAL_INT32(e.window_start, s.window_start);
+    TEST_ASSERT_EQUAL(e.short_history, s.short_history);
+    TEST_ASSERT_TRUE_MESSAGE(ink_test::same_double(e.first_norm, s.norm[0]), e.fred_id);
+    TEST_ASSERT_TRUE_MESSAGE(ink_test::same_double(e.last_norm, s.norm[s.n - 1]), e.fred_id);
+  }
+}
+
+void test_tail_merge_equals_full_fetch() {
+  const char* ids[] = {"SP500", "CBBTCUSD", "MORTGAGE30US", "MEDLISPRI31080", "DGS10", "DTWEXBGS"};
+  const int32_t g0 = ink::first_sunday_on_or_after(ink::window_start_day(FIXTURE_TODAY, 10));
+  for (const char* id : ids) {
+    char full[64], tail[64];
+    snprintf(full, sizeof full, "fixtures/fred_%s_full.json", id);
+    snprintf(tail, sizeof tail, "fixtures/fred_%s_tail.json", id);
+    ink::SundayResampler r;
+    r.begin_full(g_full, g0, FIXTURE_TODAY);            // today's full fetch
+    TEST_ASSERT_TRUE(feed_fred(full, r, 997));
+    TEST_ASSERT_TRUE(r.finish(g0));
+    r.begin_full(g_base, g0, FIXTURE_TAIL_S0);          // an older full fetch, made on day S0
+    TEST_ASSERT_TRUE(feed_fred(full, r, 997));          // observations after S0 are ignored (date > today)
+    TEST_ASSERT_TRUE(r.finish(g0));
+    TEST_ASSERT_TRUE(r.begin_tail(g_merged, g_base, FIXTURE_TAIL_S0, FIXTURE_TODAY));
+    TEST_ASSERT_TRUE(feed_fred(tail, r, 61));
+    TEST_ASSERT_TRUE(r.finish(g0));
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(g_full.first_sunday, g_merged.first_sunday, id);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(g_full.n, g_merged.n, id);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_full.values, g_merged.values, sizeof(double) * g_full.n, id);
+    TEST_ASSERT_EQUAL_INT32(g_full.latest_date, g_merged.latest_date);
+    TEST_ASSERT_EQUAL_DOUBLE(g_full.latest_value, g_merged.latest_value);
+  }
+}
+
+void test_resampler_rejects_unsorted() {
+  ink::SundayResampler r;
+  r.begin_full(g_full, ink::days_from_civil(2026, 1, 4), ink::days_from_civil(2026, 2, 1));
+  r.add(ink::days_from_civil(2026, 1, 10), 5);
+  r.add(ink::days_from_civil(2026, 1, 9), 6);
+  TEST_ASSERT_FALSE(r.finish(ink::days_from_civil(2026, 1, 4)));
+}
+
+void test_dot_values_and_duplicates() {
+  ink::SundayResampler r;
+  const int32_t sun = ink::days_from_civil(2026, 1, 4);
+  r.begin_full(g_full, sun, sun + 14);
+  const char* doc = R"({"observations":[{"date":"2026-01-02","value":"10"},{"date":"2026-01-05","value":"."},
+    {"date":"2026-01-06","value":"12"},{"date":"2026-01-06","value":"11"},{"date":"2026-01-16","value":""}]})";
+  ink::FredParser fp(r);
+  ink::json::Parser p(fp);
+  p.feed(doc, strlen(doc));
+  TEST_ASSERT_TRUE(p.finish() && fp.saw_observations());
+  TEST_ASSERT_TRUE(r.finish(sun));
+  TEST_ASSERT_EQUAL_UINT16(3, g_full.n);             // Jan 4, 11, 18
+  TEST_ASSERT_EQUAL_DOUBLE(10, g_full.values[0]);
+  TEST_ASSERT_EQUAL_DOUBLE(12, g_full.values[1]);    // duplicate date: the larger value, as sorted() pairs give
+  TEST_ASSERT_EQUAL_INT32(ink::days_from_civil(2026, 1, 6), g_full.latest_date);
+}
+
+void test_fred_bad_key_detected() {
+  ink::SundayResampler r;
+  r.begin_full(g_full, FIXTURE_TAIL_S0, FIXTURE_TODAY);
+  ink::FredParser* fp = nullptr;
+  TEST_ASSERT_FALSE(feed_fred("fixtures/fred_error_bad_key.json", r, 13, &fp));
+  TEST_ASSERT_TRUE(fp->api_key_error());
+}
+
+void test_y_range_and_ticks() {
+  static ink::Summary a, b;
+  a.n = 2; a.norm[0] = 0.5; a.norm[1] = 1.2;
+  b.n = 1; b.norm[0] = 2.0;
+  const ink::Summary* s[] = {&a, &b};
+  double lo, hi, t[6];
+  ink::y_range(s, 2, lo, hi);
+  TEST_ASSERT_EQUAL_DOUBLE(0.5 * 0.92, lo);
+  TEST_ASSERT_EQUAL_DOUBLE(2.0 * 1.08, hi);
+  TEST_ASSERT_EQUAL_INT(4, ink::log_ticks(lo, hi, t));  // 0.5, 1, 1.5, 2
+  TEST_ASSERT_EQUAL_DOUBLE(0.5, t[0]);
+  TEST_ASSERT_EQUAL_INT32(ink::days_from_civil(2024, 9, 27), ink::window_start_day(ink::days_from_civil(2026, 9, 27), 2));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_test_dir_is_absolute_and_readable);
@@ -448,5 +567,12 @@ int main() {
   RUN_TEST(test_openmeteo_path);
   RUN_TEST(test_openmeteo_fixture_any_chunking);
   RUN_TEST(test_openmeteo_skips_null_rows_and_requires_current);
+  RUN_TEST(test_fred_path);
+  RUN_TEST(test_resampler_matches_python_summaries);
+  RUN_TEST(test_tail_merge_equals_full_fetch);
+  RUN_TEST(test_resampler_rejects_unsorted);
+  RUN_TEST(test_dot_values_and_duplicates);
+  RUN_TEST(test_fred_bad_key_detected);
+  RUN_TEST(test_y_range_and_ticks);
   return UNITY_END();
 }
