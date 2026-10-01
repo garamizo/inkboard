@@ -3,6 +3,8 @@
 #include "../support/ink_test.h"
 #include "civil.h"
 #include "format.h"
+#include "tz.h"
+#include "tz_cases.h"
 
 using namespace ink;
 
@@ -73,6 +75,47 @@ void test_format_python_compatible() {
   TEST_ASSERT_EQUAL_STRING("September", MONTH_NAME[9]);
 }
 
+void test_tz_lookup() {
+  TEST_ASSERT_EQUAL_STRING("PST8PDT,M3.2.0,M11.1.0", ink::tz::lookup("America/Los_Angeles"));
+  TEST_ASSERT_NOT_NULL(ink::tz::lookup("UTC"));
+  TEST_ASSERT_NULL(ink::tz::lookup("America"));
+  TEST_ASSERT_NULL(ink::tz::lookup("../../etc/passwd"));
+  // Ramadan switches the footer rule cannot express: left out, so tz= with it is a config error.
+  TEST_ASSERT_NULL(ink::tz::lookup("Africa/Casablanca"));
+}
+
+void test_tz_every_table_rule_parses() {
+  for (const ink::tz::Entry& e : ink::tz::TABLE) {
+    ink::tz::Rule r;
+    TEST_ASSERT_TRUE_MESSAGE(ink::tz::parse(e.rule, r), e.name);
+  }
+}
+
+void test_tz_matches_zoneinfo() {
+  int failed = 0;
+  for (const TzCase& c : TZ_CASES) {
+    ink::tz::Rule r;
+    TEST_ASSERT_TRUE(ink::tz::parse(ink::tz::lookup(c.zone), r));
+    const ink::tz::Local l = ink::tz::to_local(r, c.epoch);
+    const int64_t nxt = ink::tz::next_top_of_hour(r, c.epoch);
+    if (l.day != c.day || l.hh != c.hh || l.mm != c.mm || l.offset != c.offset || nxt != c.next_top) {
+      if (failed++ < 10)
+        printf("%s @%lld: got day %d %02d:%02d off %d next %lld, want day %d %02d:%02d off %d next %lld\n", c.zone,
+               (long long)c.epoch, (int)l.day, l.hh, l.mm, (int)l.offset, (long long)nxt, (int)c.day, c.hh, c.mm,
+               (int)c.offset, (long long)c.next_top);
+    }
+  }
+  TEST_ASSERT_EQUAL_INT(0, failed);
+}
+
+void test_next_refresh_seconds_clamps() {
+  ink::tz::Rule r;
+  ink::tz::parse("UTC0", r);
+  const int64_t ten_oclock = 1790503200;  // 2026-09-27 10:00:00 UTC
+  TEST_ASSERT_EQUAL_INT32(3660, ink::tz::next_refresh_seconds(r, ten_oclock));       // 11:01
+  TEST_ASSERT_EQUAL_INT32(300, ink::tz::next_refresh_seconds(r, ten_oclock + 3590));  // 10:59:50 -> 11:01 is 70 s, clamped
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_test_dir_is_absolute_and_readable);
@@ -81,5 +124,9 @@ int main() {
   RUN_TEST(test_parse_iso_date);
   RUN_TEST(test_first_sunday);
   RUN_TEST(test_format_python_compatible);
+  RUN_TEST(test_tz_lookup);
+  RUN_TEST(test_tz_every_table_rule_parses);
+  RUN_TEST(test_tz_matches_zoneinfo);
+  RUN_TEST(test_next_refresh_seconds_clamps);
   return UNITY_END();
 }
