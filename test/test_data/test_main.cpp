@@ -1,8 +1,11 @@
 #include <unity.h>
 
+#include <algorithm>
+
 #include "../support/ink_test.h"
 #include "civil.h"
 #include "format.h"
+#include "json_stream.h"
 #include "tz.h"
 #include "tz_cases.h"
 #include "query.h"
@@ -204,6 +207,81 @@ void test_series_formats() {
   TEST_ASSERT_EQUAL_INT(-1, ink::find_series("home", 4));
 }
 
+struct Recorder : ink::json::Handler {
+  std::string log;
+  void scalar(const ink::json::Parser& p, ink::json::Type t, const char* text) override {
+    for (int i = 0; i < p.depth(); ++i) {
+      if (p.is_array(i)) log += "[" + std::to_string(p.index(i)) + "]";
+      else log += std::string(".") + p.key(i);
+    }
+    log += "=" + std::to_string(static_cast<int>(t)) + ":" + text + ";";
+  }
+  void end_container(const ink::json::Parser& p) override { log += "end@" + std::to_string(p.depth()) + ";"; }
+};
+
+static std::string parse_all(const std::string& doc, size_t chunk, bool* ok = nullptr) {
+  Recorder r;
+  ink::json::Parser p(r);
+  for (size_t i = 0; i < doc.size(); i += chunk) p.feed(doc.data() + i, std::min(chunk, doc.size() - i));
+  const bool done = p.finish();
+  if (ok) *ok = done;
+  return r.log;
+}
+
+void test_json_paths_and_types() {
+  bool ok;
+  std::string log = parse_all(R"({"a":[1,{"b":"x\"y"},true,null],"c":-2.5e3})", 1000, &ok);
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL_STRING(".a[0]=1:1;.a[1].b=0:x\"y;end@2;.a[2]=2:true;.a[3]=4:null;end@1;.c=1:-2.5e3;end@0;", log.c_str());
+}
+
+void test_json_any_chunk_split_gives_same_events() {
+  const std::string doc = R"( {"observations":[{"date":"2026-09-25","value":"6604.72"},{"date":"2026-09-26","value":"."}],
+    "u":"\u00b0F \ud83d\ude00", "e":[], "o":{}} )";
+  const std::string whole = parse_all(doc, doc.size());
+  for (size_t chunk = 1; chunk < 9; ++chunk) TEST_ASSERT_EQUAL_STRING(whole.c_str(), parse_all(doc, chunk).c_str());
+  TEST_ASSERT_NOT_EQUAL(std::string::npos, whole.find(".u=0:\xC2\xB0" "F \xF0\x9F\x98\x80;"));
+}
+
+void test_json_rejects_malformed() {
+  const char* bad[] = {"{", "[1,]", "{\"a\" 1}", "{\"a\":1,}", "[1 2]", "\"abc", "tru", "01", "1.", "-", "[1]]",
+                       "{\"a\":\"\\x\"}", "[\"\x01\"]", "{1:2}", "[[[[[[[[[1]]]]]]]]]", "\"\\ud83d\""};
+  for (const char* b : bad) {
+    bool ok = true;
+    parse_all(b, 3, &ok);
+    TEST_ASSERT_FALSE_MESSAGE(ok, b);
+  }
+  bool ok = false;
+  parse_all("  42  ", 1, &ok);
+  TEST_ASSERT_TRUE(ok);
+}
+
+void test_json_long_strings_truncate_long_keys_fail() {
+  Recorder r;
+  ink::json::Parser p(r);
+  std::string doc = "{\"m\":\"" + std::string(300, 'z') + "\"}";
+  p.feed(doc.data(), doc.size());
+  TEST_ASSERT_TRUE(p.finish());
+  TEST_ASSERT_NOT_EQUAL(std::string::npos, r.log.find(std::string(127, 'z') + ";"));
+  bool ok = true;
+  parse_all("{\"" + std::string(40, 'k') + "\":1}", 7, &ok);
+  TEST_ASSERT_FALSE(ok);
+}
+
+void test_json_at_matches_paths() {
+  struct H : ink::json::Handler {
+    int hits = 0;
+    void scalar(const ink::json::Parser& p, ink::json::Type, const char*) override {
+      hits += p.at({"observations", nullptr, "date"});
+    }
+  } h;
+  ink::json::Parser p(h);
+  const char* doc = R"({"observations":[{"date":"a"},{"value":"b","date":"c"}],"date":"x"})";
+  p.feed(doc, strlen(doc));
+  TEST_ASSERT_TRUE(p.finish());
+  TEST_ASSERT_EQUAL_INT(2, h.hits);
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_test_dir_is_absolute_and_readable);
@@ -221,5 +299,10 @@ int main() {
   RUN_TEST(test_query_url_encoding_and_negative_zero);
   RUN_TEST(test_query_errors_match_server);
   RUN_TEST(test_series_formats);
+  RUN_TEST(test_json_paths_and_types);
+  RUN_TEST(test_json_any_chunk_split_gives_same_events);
+  RUN_TEST(test_json_rejects_malformed);
+  RUN_TEST(test_json_long_strings_truncate_long_keys_fail);
+  RUN_TEST(test_json_at_matches_paths);
   return UNITY_END();
 }
