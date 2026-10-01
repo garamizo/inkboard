@@ -5,6 +5,7 @@
 #include "format.h"
 #include "tz.h"
 #include "tz_cases.h"
+#include "query.h"
 
 using namespace ink;
 
@@ -118,6 +119,90 @@ void test_next_refresh_seconds_clamps() {
   TEST_ASSERT_EQUAL_INT32(300, ink::tz::next_refresh_seconds(r, ten_oclock + 3590));  // 10:59:50 -> 11:01 is 70 s, clamped
 }
 
+static std::string qerr(const char* q) {
+  ink::Layout l;
+  char e[192] = "";
+  TEST_ASSERT_FALSE_MESSAGE(ink::parse_query(q, l, e, sizeof e), q);
+  return e;
+}
+static ink::Layout qok(const char* q) {
+  ink::Layout l;
+  char e[192] = "";
+  TEST_ASSERT_TRUE_MESSAGE(ink::parse_query(q, l, e, sizeof e), e);
+  return l;
+}
+
+void test_query_default_layout() {
+  ink::Layout l = qok("w=market_trends:2/3,calendar_weather:1/3&lat=34.05&lon=-118.24&tz=America/Los_Angeles&units=imperial");
+  TEST_ASSERT_EQUAL_UINT8(2, l.n_columns);
+  TEST_ASSERT_TRUE(l.columns[0].type == ink::WidgetType::MarketTrends && l.columns[0].size == ink::Size::TwoThirds);
+  TEST_ASSERT_TRUE(l.columns[1].type == ink::WidgetType::CalendarWeather && l.columns[1].size == ink::Size::Third);
+  TEST_ASSERT_EQUAL_DOUBLE(34.0, l.lat);      // f"{34.05:.1f}" == "34.0"
+  TEST_ASSERT_EQUAL_DOUBLE(-118.2, l.lon);
+  TEST_ASSERT_FALSE(l.metric);
+  TEST_ASSERT_EQUAL_INT(5, l.years);
+  TEST_ASSERT_EQUAL_UINT8(4, l.n_series);
+  TEST_ASSERT_EQUAL_STRING("America/Los_Angeles", l.tz);
+  TEST_ASSERT_TRUE(l.has_market && l.has_weather);
+}
+
+void test_query_market_only_needs_no_location() {
+  ink::Layout l = qok("w=market_trends:1&tz=America/Los_Angeles&series=ust10y,usd_broad&years=10");
+  TEST_ASSERT_FALSE(l.has_weather);
+  TEST_ASSERT_EQUAL_UINT8(2, l.n_series);
+  TEST_ASSERT_EQUAL_UINT8(4, l.series[0]);
+  TEST_ASSERT_EQUAL_INT(10, l.years);
+  TEST_ASSERT_EQUAL_STRING("UTC", qok("w=market_trends:1").tz);
+}
+
+void test_query_url_encoding_and_negative_zero() {
+  ink::Layout a = qok("w=calendar_weather%3A1&lat=-0.04&lon=1");
+  TEST_ASSERT_TRUE(a.columns[0].type == ink::WidgetType::CalendarWeather);
+  TEST_ASSERT_FALSE(signbit(a.lat));          // -0.0 -> 0.0, as "+ 0.0" does in params.py
+}
+
+void test_query_errors_match_server() {
+  TEST_ASSERT_EQUAL_STRING("w: sizes add up to 4/3, need 3/3", qerr("w=market_trends:2/3,market_trends:2/3").c_str());
+  TEST_ASSERT_EQUAL_STRING("w: sizes add up to 2/3, need 3/3", qerr("w=market_trends:2/3").c_str());
+  TEST_ASSERT_EQUAL_STRING("w: required, e.g. w=market_trends:2/3,calendar_weather:1/3", qerr("lat=1").c_str());
+  TEST_ASSERT_EQUAL_STRING("w: unknown widget 'nope'", qerr("w=nope:1").c_str());
+  TEST_ASSERT_EQUAL_STRING("w: expected type:size, got 'market_trends'", qerr("w=market_trends").c_str());
+  TEST_ASSERT_EQUAL_STRING("w: size must be 1/3, 2/3 or 1, got '1/2'", qerr("w=market_trends:1/2").c_str());
+  TEST_ASSERT_EQUAL_STRING("w: at most 3 widgets",
+                           qerr("w=market_trends:1/3,market_trends:1/3,market_trends:1/3,market_trends:1/3").c_str());
+  TEST_ASSERT_EQUAL_STRING("w: given more than once", qerr("w=market_trends:1&w=market_trends:1").c_str());
+  TEST_ASSERT_EQUAL_STRING("foo: unknown parameter", qerr("w=market_trends:1&foo=2").c_str());
+  TEST_ASSERT_EQUAL_STRING("lat: not used by any widget in w", qerr("w=market_trends:1&lat=1").c_str());
+  TEST_ASSERT_EQUAL_STRING("lat: required by calendar_weather", qerr("w=calendar_weather:1&lon=1").c_str());
+  TEST_ASSERT_EQUAL_STRING("lat: must be a number from -90 to 90", qerr("w=calendar_weather:1&lat=91&lon=1").c_str());
+  TEST_ASSERT_EQUAL_STRING("lat: must be a number from -90 to 90", qerr("w=calendar_weather:1&lat=nan&lon=1").c_str());
+  TEST_ASSERT_EQUAL_STRING("lat: could not convert string to float: 'abc'", qerr("w=calendar_weather:1&lat=abc&lon=1").c_str());
+  TEST_ASSERT_EQUAL_STRING("units: must be one of imperial, metric", qerr("w=calendar_weather:1&lat=1&lon=1&units=kelvin").c_str());
+  TEST_ASSERT_EQUAL_STRING("years: must be a whole number from 1 to 10", qerr("w=market_trends:1&years=11").c_str());
+  TEST_ASSERT_EQUAL_STRING("series: ids must be unique", qerr("w=market_trends:1&series=sp500,sp500").c_str());
+  TEST_ASSERT_EQUAL_STRING("series: give 1 to 4 ids", qerr("w=market_trends:1&series=sp500,btc,mortgage30,home_la,ust10y").c_str());
+  TEST_ASSERT_EQUAL_STRING("series: unknown id 'foo'; choose from sp500, btc, mortgage30, home_la, ust10y, usd_broad",
+                           qerr("w=market_trends:1&series=foo").c_str());
+  TEST_ASSERT_EQUAL_STRING("tz: unknown timezone 'Nope/Zone'", qerr("w=market_trends:1&tz=Nope/Zone").c_str());
+  TEST_ASSERT_EQUAL_STRING("tz: unknown timezone 'America'", qerr("w=market_trends:1&tz=America").c_str());
+  TEST_ASSERT_EQUAL_STRING("malformed query string", qerr("w=market_trends:1&").c_str());
+  TEST_ASSERT_EQUAL_STRING("malformed query string", qerr("w=market_trends:1%00junk").c_str());
+  TEST_ASSERT_EQUAL_STRING("malformed query string", qerr("w=calendar_weather:1&lat=1&lon=1&units=metric%00x").c_str());
+  std::string longq = "w=market_trends:1&" + std::string(1100, 'x');
+  TEST_ASSERT_EQUAL_STRING("query longer than 1024 bytes", qerr(longq.c_str()).c_str());
+}
+
+void test_series_formats() {
+  char b[32];
+  ink::format_value(ink::CATALOG[0].fmt, 7743.21, b, sizeof b); TEST_ASSERT_EQUAL_STRING("7,743", b);
+  ink::format_value(ink::CATALOG[1].fmt, 84612.0, b, sizeof b); TEST_ASSERT_EQUAL_STRING("$84.6k", b);
+  ink::format_value(ink::CATALOG[2].fmt, 7.03, b, sizeof b);    TEST_ASSERT_EQUAL_STRING("7.03%", b);
+  ink::format_value(ink::CATALOG[3].fmt, 1050000.0, b, sizeof b); TEST_ASSERT_EQUAL_STRING("$1.05M", b);
+  ink::format_value(ink::CATALOG[5].fmt, 121.44, b, sizeof b);  TEST_ASSERT_EQUAL_STRING("121.4", b);
+  TEST_ASSERT_EQUAL_INT(3, ink::find_series("home_la", 7));
+  TEST_ASSERT_EQUAL_INT(-1, ink::find_series("home", 4));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_test_dir_is_absolute_and_readable);
@@ -130,5 +215,10 @@ int main() {
   RUN_TEST(test_tz_every_table_rule_parses);
   RUN_TEST(test_tz_matches_zoneinfo);
   RUN_TEST(test_next_refresh_seconds_clamps);
+  RUN_TEST(test_query_default_layout);
+  RUN_TEST(test_query_market_only_needs_no_location);
+  RUN_TEST(test_query_url_encoding_and_negative_zero);
+  RUN_TEST(test_query_errors_match_server);
+  RUN_TEST(test_series_formats);
   return UNITY_END();
 }
