@@ -249,6 +249,18 @@ void test_weather_from_other_location_not_shown() {
   TEST_ASSERT_EQUAL_MEMORY(nodata, g_frame, ink::FRAME_BYTES);
 }
 
+void test_series_cache_of_other_series_not_shown() {
+  default_model(false);
+  snprintf(g_model.series[0].fred_id, sizeof g_model.series[0].fred_id, "DGS10");  // SP500 data, wrong id
+  ink::Bitmap bm(g_frame, ink::FRAME_W, ink::FRAME_H);
+  ink::build_frame(bm, g_model, "fw 2.0.0");
+  static uint8_t empty[ink::FRAME_BYTES];
+  g_model.series[0] = ink::SeriesCache{};
+  ink::Bitmap bm2(empty, ink::FRAME_W, ink::FRAME_H);
+  ink::build_frame(bm2, g_model, "fw 2.0.0");
+  TEST_ASSERT_EQUAL_MEMORY(empty, g_frame, ink::FRAME_BYTES);
+}
+
 void test_config_error_and_calibration() {
   ink::Bitmap bm(g_frame, ink::FRAME_W, ink::FRAME_H);
   ink::render_config_error(bm, "w: sizes add up to 2/3, need 3/3", "w=market_trends:2/3&tz=UTC");
@@ -274,6 +286,7 @@ int main() {
   RUN_TEST(test_screen_render_error);
   RUN_TEST(test_screen_auth_rejected);
   RUN_TEST(test_weather_from_other_location_not_shown);
+  RUN_TEST(test_series_cache_of_other_series_not_shown);
   RUN_TEST(test_config_error_and_calibration);
   return UNITY_END();
 }

@@ -34,10 +34,10 @@ inline void message(View& full, const Box& box, const char* text, double dy = 0)
   draw_text(full, box.x + box.w / 2.0, box.y + box.h / 2.0 + dy, text, font(14, true), BLACK, "mm");
 }
 
-inline void add_unique(const char** list, int& n, const char* a) {
+inline void add_unique(const char** list, int& n, const char* a, int max = 16) {
   for (int i = 0; i < n; ++i)
     if (strcmp(list[i], a) == 0) return;
-  list[n++] = a;
+  if (n < max) list[n++] = a;
 }
 
 }  // namespace comp_detail
@@ -118,24 +118,41 @@ inline void compose(Bitmap& frame, const Layout& l, const ColumnData* cols, cons
 
 // Word-wrapped text block; returns the y after the last line.
 inline int wrapped(View& d, int x, int y, int width, const char* text, const Font& f, int line_h) {
-  char line[512] = "";
+  constexpr size_t CAP = 256;
+  char line[CAP] = "";
+  size_t len = 0;
   const char* p = text;
   while (*p) {
     const char* sp = strchr(p, ' ');
-    const size_t n = sp ? static_cast<size_t>(sp - p) : strlen(p);
-    char trial[512];
-    snprintf(trial, sizeof trial, "%s%s%.*s", line, line[0] ? " " : "", static_cast<int>(n), p);
-    if (line[0] && text_length(f, trial) > width) {
+    size_t n = sp ? static_cast<size_t>(sp - p) : strlen(p);
+    if (n > CAP - 1) n = CAP - 1;  // a word longer than a line buffer is cut
+    // trial = line + " " + word, built with explicit lengths (memcpy, never truncating silently)
+    char trial[CAP];
+    size_t tl = 0;
+    if (len) {
+      memcpy(trial, line, len);
+      tl = len;
+      if (tl < CAP - 1) trial[tl++] = ' ';
+    }
+    const size_t room = CAP - 1 - tl;
+    const size_t take = n < room ? n : room;
+    memcpy(trial + tl, p, take);
+    tl += take;
+    trial[tl] = 0;
+    if (len && text_length(f, trial) > width) {
       draw_text(d, x, y, line, f, BLACK);
       y += line_h;
-      snprintf(line, sizeof line, "%.*s", static_cast<int>(n), p);
+      memcpy(line, p, n);
+      len = n;
+      line[len] = 0;
     } else {
-      snprintf(line, sizeof line, "%s", trial);
+      memcpy(line, trial, tl + 1);
+      len = tl;
     }
-    p += n;
+    p += (sp ? static_cast<size_t>(sp - p) : strlen(p));
     while (*p == ' ') ++p;
   }
-  if (line[0]) {
+  if (len) {
     draw_text(d, x, y, line, f, BLACK);
     y += line_h;
   }

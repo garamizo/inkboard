@@ -2,6 +2,7 @@
 // Everything one render needs, and the step from cached data to a frame (spec §4.2 step 6):
 // the per-column states of compositor.py's fetch_widgets, computed from the caches.
 #include <stdio.h>
+#include <string.h>
 
 #include "compositor.h"
 #include "data_cache.h"
@@ -55,7 +56,8 @@ inline void build_frame(Bitmap& frame, const Model& m, const char* version) {
     g_market = MarketPayload{l.n_series, {}, l.years, today};
     for (int i = 0; i < l.n_series && market_col.state == ColumnState::Ok; ++i) {
       const SeriesCache& c = m.series[i];
-      if (!c.valid || c.data.latest_date == INT32_MIN) {
+      // A cache from before a reflash with another series= list must not show under this series.
+      if (!c.valid || strcmp(c.fred_id, CATALOG[l.series[i]].fred_id) != 0 || c.data.latest_date == INT32_MIN) {
         market_col.state = c.status.auth_rejected ? ColumnState::AuthRejected : ColumnState::NoData;
         market_col.nodata_source = "fred";
       } else if (!summarize(l.series[i], c.data, today, l.years, g_summaries[i])) {
