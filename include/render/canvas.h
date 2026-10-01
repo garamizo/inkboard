@@ -556,7 +556,8 @@ struct PolyMask;
 
 class View {  // a box of a Bitmap: local coordinates, clipped
  public:
-  View(Bitmap& bm, Box box) : bm_(bm), box_(clip_to(box, Box{0, 0, bm.w(), bm.h()})), ox_(box.x), oy_(box.y) {}
+  View(Bitmap& bm, Box box)
+      : bm_(bm), box_(clip_to(box, Box{0, 0, bm.w(), bm.h()})), ox_(box.x), oy_(box.y), ih_(box.h) {}
   int w() const { return box_.x + box_.w - ox_; }
   int h() const { return box_.y + box_.h - oy_; }
   View sub(Box local) const {
@@ -564,9 +565,9 @@ class View {  // a box of a Bitmap: local coordinates, clipped
     v.box_ = clip_to(v.box_, box_);
     return v;
   }
-  void px(int x, int y, int ink) { put(x + ox_, y + oy_, ink); }
+  void px(int x, int y, int ink) { put(x, y, ink); }
   void fill(int ink) {  // Image.paste(ink, box)
-    for (int y = box_.y; y < box_.y + box_.h; ++y) hline(box_.x, y, box_.x + box_.w - 1, ink);
+    for (int y = box_.y; y < box_.y + box_.h; ++y) bm_.span(box_.x, box_.x + box_.w - 1, y, ink);
   }
 
   void point(double x, double y, int ink);
@@ -589,18 +590,20 @@ class View {  // a box of a Bitmap: local coordinates, clipped
     return Box{x0, y0, x1 > x0 ? x1 - x0 : 0, y1 > y0 ? y1 - y0 : 0};
   }
 
-  // The rasterizers run in bitmap coordinates, as the server's did in frame coordinates:
-  // Python's round() (half to even), the float edge math and the image-height clamps are not
-  // invariant under a translation, so local inputs are offset before any of them happen.
-  // Pillow clips to the image; here the writes clip to the view's box (inside the bitmap).
-  int ax(double x) const { return static_cast<int>(x + ox_); }  // _imaging.c: (int)xy[i]
-  int ay(double y) const { return static_cast<int>(y + oy_); }
+  // A view is a Pillow image of the box's size pasted at box.x/box.y, as each server widget
+  // drew on its own Image.new("L", (box.w, box.h)): truncation, Python's round() (half to
+  // even), the float edge math and the image-height clamps all happen in local coordinates
+  // (none of them survive a translation). Only the pixel writes are offset, and clipped to
+  // the box (already inside the bitmap and, for a sub-view, the parent).
+  static int ix(double v) { return static_cast<int>(v); }  // _imaging.c: (int)xy[i]
 
   void put(int x, int y, int ink) {  // point8
+    x += ox_, y += oy_;
     if (x < box_.x || y < box_.y || x >= box_.x + box_.w || y >= box_.y + box_.h) return;
     bm_.set(x, y, ink);
   }
   void hline(int x0, int y, int x1, int ink) {  // hline8
+    x0 += ox_, x1 += ox_, y += oy_;
     if (y < box_.y || y >= box_.y + box_.h) return;
     if (x0 < box_.x) x0 = box_.x;
     if (x1 > box_.x + box_.w - 1) x1 = box_.x + box_.w - 1;
@@ -608,8 +611,6 @@ class View {  // a box of a Bitmap: local coordinates, clipped
   }
   void line8(int x0, int y0, int x1, int y1, int ink);
   void wide_line(int x0, int y0, int x1, int y1, int ink, int width, PolyMask* mask);
-  void rectangle_abs(double x0, double y0, double x1, double y1, int fill, int outline, int width);
-  void ellipse_abs(double x0, double y0, double x1, double y1, int fill, int outline, int width);
   void rect(int x0, int y0, int x1, int y1, int ink, bool fill, int width);
   void ellipse_new(int x0, int y0, int x1, int y1, int ink, bool fill, int width);
   void clip_ellipse(int x0, int y0, int x1, int y1, pil::ClipEllipseState& st, int ink);
@@ -620,6 +621,7 @@ class View {  // a box of a Bitmap: local coordinates, clipped
   Bitmap& bm_;
   Box box_;      // absolute, already clipped
   int ox_, oy_;  // origin of local coordinates (unclipped box.x/box.y)
+  int ih_;       // height of the Pillow image this view stands for (its width only clips)
 };
 
 // The fill of a polygon as a mask, one row at a time: ImageDraw.polygon draws a wide outline
@@ -729,13 +731,14 @@ inline void View::wide_line(int x0, int y0, int x1, int y1, int ink, int width, 
       hline(a, y, b, ink);
       return;
     }
-    if (y < box_.y || y >= box_.y + box_.h) return;
-    if (a < box_.x) a = box_.x;
-    if (b > box_.x + box_.w - 1) b = box_.x + box_.w - 1;
+    // hline8 with a mask: clip, then test the mask pixel by pixel (local coordinates).
+    if (y + oy_ < box_.y || y + oy_ >= box_.y + box_.h) return;
+    if (a + ox_ < box_.x) a = box_.x - ox_;
+    if (b + ox_ > box_.x + box_.w - 1) b = box_.x + box_.w - 1 - ox_;
     for (int x = a; x <= b; x++)
-      if (m->covers(x, y)) bm_.set(x, y, ink);
+      if (m->covers(x, y)) bm_.set(x + ox_, y + oy_, ink);
   };
-  pil::polygon_generic(e, 4, table, xx, bm_.h(), hl);
+  pil::polygon_generic(e, 4, table, xx, ih_, hl);
 }
 
 // ImagingDrawRectangle
@@ -747,9 +750,9 @@ inline void View::rect(int x0, int y0, int x1, int y1, int ink, bool fill, int w
   }
   if (fill) {
     if (y0 < 0) y0 = 0;
-    else if (y0 >= bm_.h()) return;
+    else if (y0 >= ih_) return;
     if (y1 < 0) return;
-    else if (y1 > bm_.h()) y1 = bm_.h();
+    else if (y1 > ih_) y1 = ih_;
     for (int y = y0; y <= y1; y++) hline(x0, y, x1, ink);
   } else {
     if (width == 0) width = 1;
@@ -823,7 +826,7 @@ inline void View::polygon_fill(const int* xy, int count, int ink) {
   if (e && table && xx) {
     const int n = pil::polygon_edges(e, count, xy);
     auto hl = [this, ink](int a, int y, int b) { hline(a, y, b, ink); };
-    pil::polygon_generic(e, n, table, xx, bm_.h(), hl);
+    pil::polygon_generic(e, n, table, xx, ih_, hl);
   }
   free(xx);
   free(table);
@@ -834,25 +837,21 @@ inline void View::polygon_fill(const int* xy, int count, int ink) {
 
 inline void View::point(double x, double y, int ink) {
   if (ink == NONE) return;
-  put(ax(x), ay(y), ink);
+  put(ix(x), ix(y), ink);
 }
 
 inline void View::line(const Pt* pts, int n, int ink, int width) {
   if (ink == NONE || width == 0 || n < 1) return;
   if (width == 1) {
-    for (int i = 0; i < n - 1; i++) line8(ax(pts[i].x), ay(pts[i].y), ax(pts[i + 1].x), ay(pts[i + 1].y), ink);
-    if (n > 1) put(ax(pts[n - 1].x), ay(pts[n - 1].y), ink);  // draw last point
+    for (int i = 0; i < n - 1; i++) line8(ix(pts[i].x), ix(pts[i].y), ix(pts[i + 1].x), ix(pts[i + 1].y), ink);
+    if (n > 1) put(ix(pts[n - 1].x), ix(pts[n - 1].y), ink);  // draw last point
   } else {
     for (int i = 0; i < n - 1; i++)
-      wide_line(ax(pts[i].x), ay(pts[i].y), ax(pts[i + 1].x), ay(pts[i + 1].y), ink, width, nullptr);
+      wide_line(ix(pts[i].x), ix(pts[i].y), ix(pts[i + 1].x), ix(pts[i + 1].y), ink, width, nullptr);
   }
 }
 
 inline void View::rectangle(double x0, double y0, double x1, double y1, int fill, int outline, int width) {
-  rectangle_abs(x0 + ox_, y0 + oy_, x1 + ox_, y1 + oy_, fill, outline, width);
-}
-
-inline void View::rectangle_abs(double x0, double y0, double x1, double y1, int fill, int outline, int width) {
   if (x1 < x0 || y1 < y0) return;  // Pillow raises ValueError
   if (fill != NONE) rect(static_cast<int>(x0), static_cast<int>(y0), static_cast<int>(x1), static_cast<int>(y1), fill, true, 0);
   if (outline != NONE && outline != fill && width != 0)
@@ -860,10 +859,6 @@ inline void View::rectangle_abs(double x0, double y0, double x1, double y1, int 
 }
 
 inline void View::ellipse(double x0, double y0, double x1, double y1, int fill, int outline, int width) {
-  ellipse_abs(x0 + ox_, y0 + oy_, x1 + ox_, y1 + oy_, fill, outline, width);
-}
-
-inline void View::ellipse_abs(double x0, double y0, double x1, double y1, int fill, int outline, int width) {
   if (x1 < x0 || y1 < y0) return;  // Pillow raises ValueError
   if (fill != NONE)
     ellipse_new(static_cast<int>(x0), static_cast<int>(y0), static_cast<int>(x1), static_cast<int>(y1), fill, true, 0);
@@ -875,7 +870,7 @@ inline void View::polygon(const Pt* pts, int n, int fill, int outline, int width
   if (n < 2) return;  // Pillow raises TypeError
   int* xy = static_cast<int*>(malloc(sizeof(int) * 2 * n));
   if (!xy) return;
-  for (int i = 0; i < n; i++) xy[2 * i] = ax(pts[i].x), xy[2 * i + 1] = ay(pts[i].y);
+  for (int i = 0; i < n; i++) xy[2 * i] = ix(pts[i].x), xy[2 * i + 1] = ix(pts[i].y);
   if (fill != NONE) polygon_fill(xy, n, fill);
   if (outline != NONE && outline != fill && width != 0) {
     if (width == 1) {
@@ -891,9 +886,9 @@ inline void View::polygon(const Pt* pts, int n, int fill, int outline, int width
       if (m.e && table && xx && m.spans) {
         m.n = pil::polygon_edges(m.e, n, xy);
         auto none = [](int, int, int) {};  // the setup pass's horizontal edges are replayed per row
-        pil::poly_setup(m.scan, m.e, m.n, table, xx, bm_.h(), none);
+        pil::poly_setup(m.scan, m.e, m.n, table, xx, ih_, none);
         m.nspans = 0;
-        m.y = -1 - bm_.h();  // no row cached yet
+        m.y = -1 - ih_;  // no row cached yet
         const int w2 = width * 2 - 1;
         int i;
         for (i = 0; i < n - 1; i++) wide_line(xy[i * 2], xy[i * 2 + 1], xy[i * 2 + 2], xy[i * 2 + 3], outline, w2, &m);
@@ -910,7 +905,6 @@ inline void View::polygon(const Pt* pts, int n, int fill, int outline, int width
 
 inline void View::rounded_rectangle(double x0, double y0, double x1, double y1, double radius, int fill,
                                     int outline, int width) {
-  x0 += ox_, x1 += ox_, y0 += oy_, y1 += oy_;
   if (x1 < x0 || y1 < y0) return;  // Pillow raises ValueError
   // Python min() over (x1 - x0, y1 - y0, radius * 2), still in floats.
   double d = x1 - x0;
@@ -921,8 +915,8 @@ inline void View::rounded_rectangle(double x0, double y0, double x1, double y1, 
   if (full_x) d = rx1 - rx0;  // the two left and two right corners are joined
   const bool full_y = d >= ry1 - ry0 - 1;
   if (full_y) d = ry1 - ry0;
-  if (full_x && full_y) return ellipse_abs(x0, y0, x1, y1, fill, outline, width);  // a circle
-  if (d == 0) return rectangle_abs(x0, y0, x1, y1, fill, outline, width);
+  if (full_x && full_y) return ellipse(x0, y0, x1, y1, fill, outline, width);  // a circle
+  if (d == 0) return rectangle(x0, y0, x1, y1, fill, outline, width);
   // Every corner box is inverted when d < 0, so _draw_pieslice / _draw_arc raise before drawing.
   if (d < 0 || (fill == NONE && (outline == NONE || width == 0))) return;
 

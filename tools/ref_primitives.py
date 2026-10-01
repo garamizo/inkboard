@@ -49,6 +49,11 @@ CASES = {
     "polygon_diamond": [("line", [0, 32, 119, 32], 0, -1, 2), ("polygon", [60, 20, 72, 32, 60, 44, 48, 32], 255, 0, 2)],
     "rounded_small": [("rounded_rectangle", [10.5, 10, 60.5, 32, 4], 0, -1, 1)],
     "rounded_float": [("rounded_rectangle", [70.3, 40.1, 110.6, 62.9, 4], 0, -1, 1)],
+    # Negative coordinates: (int) truncates toward zero, so a view must not offset before it.
+    "neg_line_w5": [("line", [-14.72, 24, 136.65, 77.6], 0, -1, 5)],
+    "neg_ellipse_outline_w4": [("ellipse", [-9.75, 14, 30.25, 63.2], -1, 0, 4)],
+    "neg_polygon_rounded": [("polygon", [-12.6, 70.4, 40.3, -8.7, 60.2, 75.5], 0, -1, 1),
+                            ("rounded_rectangle", [-6.5, -3.5, 30.5, 20.5, 6], 255, -1, 1)],
 }
 
 

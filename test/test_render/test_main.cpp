@@ -66,6 +66,37 @@ void test_primitives_match_pillow() {
   TEST_ASSERT_EQUAL_INT_MESSAGE(0, failed, "primitives differ from Pillow");
 }
 
+// A view stands for a Pillow image of its box's size pasted at box.x (each server widget drew
+// on its own image), so a case drawn at a column offset must match the same reference.
+void test_primitives_match_pillow_at_column_offsets() {
+  int failed = 0;
+  const int offsets[] = {266, 534};
+  const int stride = (ink::FRAME_W + 7) / 8, rstride = (PRIM_W + 7) / 8;
+  for (int ox : offsets)
+    for (const PrimCase& c : PRIM_CASES) {
+      std::vector<uint8_t> frame(static_cast<size_t>(stride) * PRIM_H);
+      ink::Bitmap bm(frame.data(), ink::FRAME_W, PRIM_H);
+      bm.fill(ink::WHITE);
+      ink::View v(bm, ink::Box{ox, 0, PRIM_W, PRIM_H});
+      for (int i = 0; i < c.n_ops; ++i) replay(v, c.ops[i]);
+      std::vector<uint8_t> region(static_cast<size_t>(rstride) * PRIM_H, 0xFF);
+      long outside = 0;
+      for (int y = 0; y < PRIM_H; ++y)
+        for (int x = 0; x < ink::FRAME_W; ++x) {
+          const bool black = bm.is_black(x, y);
+          if (x < ox || x >= ox + PRIM_W) outside += black;
+          else if (black) region[y * rstride + (x - ox) / 8] &= static_cast<uint8_t>(~(0x80 >> ((x - ox) & 7)));
+        }
+      long diff = ink_test::match_reference((std::string("reference/primitives/") + c.name + ".pbm").c_str(),
+                                            region.data(), PRIM_W, PRIM_H);
+      if (diff != 0 || outside != 0) {
+        printf("primitive %s at x=%d: %ld pixels differ, %ld outside the box\n", c.name, ox, diff, outside);
+        ++failed;
+      }
+    }
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, failed, "offset views differ from Pillow");
+}
+
 void test_view_clips_and_translates() {
   std::vector<uint8_t> bits(static_cast<size_t>(10 / 8 + 1) * 10, 0xFF);
   ink::Bitmap bm(bits.data(), 10, 10);
@@ -84,6 +115,7 @@ int main() {
   RUN_TEST(test_crc32_known_value);
   RUN_TEST(test_png_header_and_size);
   RUN_TEST(test_primitives_match_pillow);
+  RUN_TEST(test_primitives_match_pillow_at_column_offsets);
   RUN_TEST(test_view_clips_and_translates);
   return UNITY_END();
 }
