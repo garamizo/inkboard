@@ -67,6 +67,12 @@ setup-server:
 test *ARGS:
     cd server && uv run pytest -q {{ARGS}}
 
+# Render a layout to .pio/preview.png on this machine (default: FRAME_QUERY in include/config.h).
+# Live data needs FRED_API_KEY (env or include/secrets.h); --fixtures renders offline.
+preview QUERY="" FLAGS="":
+    pio run -s -e preview
+    .pio/build/preview/program {{ if QUERY == "" { "" } else { "--query '" + QUERY + "'" } }} {{FLAGS}}
+
 # Dev server with auto-reload on :8765, reachable on the LAN; never touches production.
 dev:
     #!/usr/bin/env bash
