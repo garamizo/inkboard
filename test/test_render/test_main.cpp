@@ -5,6 +5,8 @@
 #include "render/png.h"
 #include "render/canvas.h"
 #include "prim_cases.h"
+#include "render/text.h"
+#include "text_cases.h"
 
 void setUp() {}
 void tearDown() {}
@@ -110,6 +112,41 @@ void test_view_clips_and_translates() {
   TEST_ASSERT_EQUAL_INT(3, inner.h());
 }
 
+void test_every_widget_font_exists() {
+  const int regular[] = {10, 11, 12, 13, 14, 15, 18};
+  const int bold[] = {8, 11, 12, 13, 14, 15, 17, 18, 20, 22, 26, 36, 46};
+  for (int s : regular) TEST_ASSERT_NOT_NULL(ink::find_font(s, false));
+  for (int s : bold) TEST_ASSERT_NOT_NULL(ink::find_font(s, true));
+  TEST_ASSERT_NULL(ink::find_font(9, false));
+  TEST_ASSERT_NOT_NULL(ink::find_glyph(ink::font(10), 0x26A0));  // ⚠
+}
+
+void test_text_length_matches_pillow() {
+  for (const TextCase& c : TEXT_CASES) {
+    TEST_ASSERT_DOUBLE_WITHIN_MESSAGE(1.0 / 64, c.length, ink::text_length(ink::font(c.size, c.bold), c.text), c.text);
+  }
+}
+
+void test_text_matches_pillow() {
+  int failed = 0;
+  for (size_t i = 0; i < sizeof(TEXT_CASES) / sizeof(TEXT_CASES[0]); ++i) {
+    const TextCase& c = TEXT_CASES[i];
+    std::vector<uint8_t> bits(static_cast<size_t>((TEXT_W + 7) / 8) * TEXT_H);
+    ink::Bitmap bm(bits.data(), TEXT_W, TEXT_H);
+    bm.fill(ink::WHITE);
+    ink::View v(bm, ink::Box{0, 0, TEXT_W, TEXT_H});
+    ink::draw_text(v, c.x, c.y, c.text, ink::font(c.size, c.bold), ink::BLACK, c.anchor);
+    char rel[64];
+    snprintf(rel, sizeof rel, "reference/text/case_%02zu.pbm", i);
+    long diff = ink_test::match_reference(rel, bits.data(), TEXT_W, TEXT_H);
+    if (diff != 0) {
+      printf("text case %zu (%s, %s): %ld pixels differ\n", i, c.text, c.anchor, diff);
+      ++failed;
+    }
+  }
+  TEST_ASSERT_EQUAL_INT_MESSAGE(0, failed, "text differs from Pillow");
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_crc32_known_value);
@@ -117,5 +154,8 @@ int main() {
   RUN_TEST(test_primitives_match_pillow);
   RUN_TEST(test_primitives_match_pillow_at_column_offsets);
   RUN_TEST(test_view_clips_and_translates);
+  RUN_TEST(test_every_widget_font_exists);
+  RUN_TEST(test_text_length_matches_pillow);
+  RUN_TEST(test_text_matches_pillow);
   return UNITY_END();
 }

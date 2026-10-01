@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import ImageFont
 
-FONT_DIR = Path(__file__).resolve().parent.parent / "fonts"
+FONT_DIR = Path(__file__).resolve().parents[3] / "tools" / "fonts"
 
 
 @lru_cache(maxsize=None)
