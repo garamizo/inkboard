@@ -12,6 +12,7 @@
 #include "widgets/calendar_weather.h"
 #include "sources/fred.h"
 #include "widgets/market_trends.h"
+#include "model.h"
 
 
 void setUp() {}
@@ -176,6 +177,88 @@ void test_market_trends_short_series() {
   render_market("market_trends_short_series", ink::Size::TwoThirds, p);
 }
 
+
+static ink::Model g_model;
+static uint8_t g_frame[ink::FRAME_BYTES];
+
+static void default_model(bool stale) {
+  g_model = ink::Model{};
+  char e[192];
+  TEST_ASSERT_TRUE(ink::parse_query("w=market_trends:2/3,calendar_weather:1/3&lat=34.1&lon=-118.2"
+                                    "&tz=America/Los_Angeles&units=imperial", g_model.layout, e, sizeof e));
+  g_model.now = FIXTURE_NOW + (stale ? 7 * 3600 : 0);
+  g_model.weather.valid = true;
+  g_model.weather.key = ink::weather_key(g_model.layout);
+  g_model.weather.data = fixture_weather();
+  g_model.weather.status.fetched_at = FIXTURE_NOW;
+  g_model.weather.status.last_attempt_failed = stale;
+  const char* ids[] = {"SP500", "CBBTCUSD", "MORTGAGE30US", "MEDLISPRI31080"};
+  for (int i = 0; i < 4; ++i) {
+    load_series(i, ids[i]);
+    ink::SeriesCache& c = g_model.series[i];
+    c.valid = true;
+    snprintf(c.fred_id, sizeof c.fred_id, "%s", ids[i]);
+    c.data = g_series[i];
+    c.status.fetched_at = FIXTURE_NOW;
+    c.status.last_attempt_failed = stale;
+  }
+}
+
+static void check_screen(const char* name, bool has_reference) {
+  ink::Bitmap bm(g_frame, ink::FRAME_W, ink::FRAME_H);
+  ink::build_frame(bm, g_model, "fw 2.0.0");
+  if (has_reference) check_reference(name, g_frame, ink::FRAME_W, ink::FRAME_H);
+  else ink_test::golden(name, g_frame, ink::FRAME_W, ink::FRAME_H);
+}
+
+void test_screen_default() { default_model(false); check_screen("screen_default", true); }
+void test_screen_stale() { default_model(true); check_screen("screen_stale", true); }
+
+void test_screen_nodata() {
+  default_model(false);
+  g_model.weather = ink::WeatherCache{};
+  for (auto& s : g_model.series) s = ink::SeriesCache{};
+  check_screen("screen_nodata", true);
+}
+
+void test_screen_render_error() {
+  default_model(false);
+  g_model.weather.data.temp = NAN;  // fails weather_payload_ok -> "error: calendar_weather"
+  check_screen("screen_render_error", true);
+}
+
+void test_screen_auth_rejected() {
+  default_model(false);
+  for (auto& s : g_model.series) {
+    s = ink::SeriesCache{};
+    s.status.auth_rejected = true;
+    s.status.last_attempt_failed = true;
+  }
+  check_screen("screen_auth_rejected", false);
+}
+
+void test_weather_from_other_location_not_shown() {
+  default_model(false);
+  g_model.weather.key.lat = 40.7;  // cache from before a reflash with another location
+  ink::Bitmap bm(g_frame, ink::FRAME_W, ink::FRAME_H);
+  ink::build_frame(bm, g_model, "fw 2.0.0");
+  static uint8_t nodata[ink::FRAME_BYTES];
+  g_model.weather = ink::WeatherCache{};
+  ink::Bitmap bm2(nodata, ink::FRAME_W, ink::FRAME_H);
+  ink::build_frame(bm2, g_model, "fw 2.0.0");
+  TEST_ASSERT_EQUAL_MEMORY(nodata, g_frame, ink::FRAME_BYTES);
+}
+
+void test_config_error_and_calibration() {
+  ink::Bitmap bm(g_frame, ink::FRAME_W, ink::FRAME_H);
+  ink::render_config_error(bm, "w: sizes add up to 2/3, need 3/3", "w=market_trends:2/3&tz=UTC");
+  ink_test::golden("screen_config_error", g_frame, ink::FRAME_W, ink::FRAME_H);
+  ink::render_calibration(bm);
+  // frame.py drew this pattern without fontmode "1" (anti-aliased, then thresholded), so its
+  // text differs slightly from ours; the shapes are what bring-up checks. Golden only.
+  ink_test::golden("calibration", g_frame, ink::FRAME_W, ink::FRAME_H);
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_wmo_mapping);
@@ -185,5 +268,12 @@ int main() {
   RUN_TEST(test_calendar_weather_matches_server);
   RUN_TEST(test_market_trends_matches_server);
   RUN_TEST(test_market_trends_short_series);
+  RUN_TEST(test_screen_default);
+  RUN_TEST(test_screen_stale);
+  RUN_TEST(test_screen_nodata);
+  RUN_TEST(test_screen_render_error);
+  RUN_TEST(test_screen_auth_rejected);
+  RUN_TEST(test_weather_from_other_location_not_shown);
+  RUN_TEST(test_config_error_and_calibration);
   return UNITY_END();
 }
