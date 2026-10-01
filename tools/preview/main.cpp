@@ -47,7 +47,8 @@ static bool fetch(const std::string& url, const std::string& fixture, ink::json:
 }
 
 static std::string fred_key() {
-  if (const char* k = getenv("FRED_API_KEY")) return k;
+  if (const char* k = getenv("FRED_API_KEY"))
+    if (*k) return k;
   std::smatch m;
   const std::string s = slurp(std::string(INK_TEST_DIR) + "/../include/secrets.h");
   if (std::regex_search(s, m, std::regex("#define\\s+FRED_API_KEY\\s+\"([^\"]+)\""))) return m[1];
