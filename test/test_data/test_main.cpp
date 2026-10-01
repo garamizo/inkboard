@@ -485,7 +485,7 @@ void test_tail_merge_equals_full_fetch() {
     TEST_ASSERT_EQUAL_UINT16_MESSAGE(g_full.n, g_merged.n, id);
     TEST_ASSERT_EQUAL_MEMORY_MESSAGE(g_full.values, g_merged.values, sizeof(double) * g_full.n, id);
     TEST_ASSERT_EQUAL_INT32(g_full.latest_date, g_merged.latest_date);
-    TEST_ASSERT_EQUAL_DOUBLE(g_full.latest_value, g_merged.latest_value);
+    TEST_ASSERT_TRUE_MESSAGE(ink_test::same_double(g_full.latest_value, g_merged.latest_value), id);
   }
 }
 
@@ -511,6 +511,7 @@ void test_dot_values_and_duplicates() {
   TEST_ASSERT_EQUAL_UINT16(3, g_full.n);             // Jan 4, 11, 18
   TEST_ASSERT_EQUAL_DOUBLE(10, g_full.values[0]);
   TEST_ASSERT_EQUAL_DOUBLE(12, g_full.values[1]);    // duplicate date: the larger value, as sorted() pairs give
+  TEST_ASSERT_EQUAL_DOUBLE(12, g_full.values[2]);  // Jan 18: still the Jan 6 value (Jan 16 is blank)
   TEST_ASSERT_EQUAL_INT32(ink::days_from_civil(2026, 1, 6), g_full.latest_date);
 }
 

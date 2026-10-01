@@ -41,7 +41,11 @@ inline bool value_on_or_before(const SeriesData& d, int32_t g, double& v) {
 }
 
 inline bool summarize(int series, const SeriesData& d, int32_t today, int years, Summary& out) {
-  out = Summary{};
+  // Reset in place: a Summary{} temporary is ~8 KB of stack.
+  out.n = 0;
+  out.has_yoy = false;
+  out.short_history = false;
+  out.yoy = 0;
   out.series = series;
   const int32_t g0 = first_sunday_on_or_after(window_start_day(today, years));
   double v;
@@ -55,8 +59,15 @@ inline bool summarize(int series, const SeriesData& d, int32_t today, int years,
     out.norm[out.n++] = v;
   }
   if (out.n == 0) return false;
-  double sum = 0;
-  for (int i = 0; i < out.n; ++i) sum += out.norm[i];  // same order as Python's sum()
+  // Same algorithm as Python 3.12's sum() of floats (Neumaier-compensated), same order.
+  double sum = 0, comp = 0;
+  for (int i = 0; i < out.n; ++i) {
+    const double x = out.norm[i], t = sum + x;
+    if (fabs(sum) >= fabs(x)) comp += (sum - t) + x;
+    else comp += (x - t) + sum;
+    sum = t;
+  }
+  if (comp != 0 && isfinite(comp)) sum += comp;
   const double mean = sum / out.n;
   out.last = out.norm[out.n - 1];
   out.ratio = out.last / mean;

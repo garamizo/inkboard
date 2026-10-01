@@ -108,7 +108,12 @@ class SundayResampler {
  private:
   void start(SeriesData& out, int32_t today) {
     out_ = &out;
-    out = SeriesData{};
+    // Reset in place: a SeriesData{} temporary is 4.3 KB of stack on the ESP32 loop task.
+    out.first_sunday = INT32_MIN;
+    out.n = 0;
+    out.latest_date = INT32_MIN;
+    out.latest_value = 0;
+    out.covered_from = INT32_MIN;
     today_ = today;
     has_last_ = tail_ = false;
     ok_ = true;
@@ -123,6 +128,7 @@ class SundayResampler {
         memmove(o.values, o.values + 1, sizeof(double) * (MAX_POINTS - 1));
         --o.n;
         o.first_sunday += 7;
+        if (o.covered_from < o.first_sunday) o.covered_from = o.first_sunday;
       }
       if (o.n == 0) o.first_sunday = next_;
       o.values[o.n++] = last_value_;
@@ -145,7 +151,9 @@ class FredParser : public json::Handler {
     if (p.at({"observations", nullptr, "date"})) {
       date_ = t == json::Type::String ? parse_iso_date(s) : INT32_MIN;
     } else if (p.at({"observations", nullptr, "value"})) {
-      snprintf(value_, sizeof value_, "%s", t == json::Type::String ? s : "");
+      // A string that does not fit is not a FRED number: drop it rather than parse a prefix.
+      const int len = snprintf(value_, sizeof value_, "%s", t == json::Type::String ? s : "");
+      if (len < 0 || len >= static_cast<int>(sizeof value_)) value_[0] = '\0';
     } else if (p.at({"error_message"}) && t == json::Type::String) {
       key_error_ = strstr(s, "api_key") != nullptr;
     }
