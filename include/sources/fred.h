@@ -62,7 +62,7 @@ class SundayResampler {
   }
 
   void add(int32_t date, double value) {
-    if (!ok_ || date == INT32_MIN || date > today_ || !(value > 0)) return;  // also drops NaN
+    if (!ok_ || date == INT32_MIN || date > today_ || !(value > 0) || !isfinite(value)) return;  // drops NaN and 1e309 (inf)
     if (tail_ && date <= s0_) return;
     if (count_ > 0 && date < obs_date_) {
       ok_ = false;  // FRED sorts ascending; anything else would need the whole series in RAM

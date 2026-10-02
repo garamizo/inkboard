@@ -516,6 +516,25 @@ void test_dot_values_and_duplicates() {
   TEST_ASSERT_EQUAL_INT32(ink::days_from_civil(2026, 1, 6), g_full.latest_date);
 }
 
+void test_inf_value_skipped() {
+  ink::SundayResampler r;
+  const int32_t sun = ink::days_from_civil(2026, 1, 4);
+  r.begin_full(g_full, sun, sun + 14);
+  const char* doc = R"({"observations":[{"date":"2026-01-02","value":"10"},{"date":"2026-01-06","value":"1e309"},
+    {"date":"2026-01-07","value":"12"}]})";
+  ink::FredParser fp(r);
+  ink::json::Parser p(fp);
+  p.feed(doc, strlen(doc));
+  TEST_ASSERT_TRUE(p.finish() && fp.saw_observations());
+  TEST_ASSERT_TRUE(r.finish(sun));
+  TEST_ASSERT_EQUAL_UINT16(3, g_full.n);
+  TEST_ASSERT_EQUAL_DOUBLE(10, g_full.values[0]);
+  TEST_ASSERT_EQUAL_DOUBLE(12, g_full.values[1]);   // as if the inf row were absent
+  TEST_ASSERT_EQUAL_DOUBLE(12, g_full.values[2]);
+  TEST_ASSERT_EQUAL_DOUBLE(12, g_full.latest_value);
+  TEST_ASSERT_EQUAL_INT32(ink::days_from_civil(2026, 1, 7), g_full.latest_date);
+}
+
 void test_fred_bad_key_detected() {
   ink::SundayResampler r;
   r.begin_full(g_full, FIXTURE_TAIL_S0, FIXTURE_TODAY);
@@ -714,6 +733,7 @@ int main() {
   RUN_TEST(test_tail_merge_equals_full_fetch);
   RUN_TEST(test_resampler_rejects_unsorted);
   RUN_TEST(test_dot_values_and_duplicates);
+  RUN_TEST(test_inf_value_skipped);
   RUN_TEST(test_fred_bad_key_detected);
   RUN_TEST(test_y_range_and_ticks);
   RUN_TEST(test_due_rules);

@@ -26,7 +26,13 @@ inline bool market_payload_ok(const MarketPayload& p) {
   if (p.n < 1 || p.n > 4) return false;
   for (int i = 0; i < p.n; ++i)
     if (p.series[i] == nullptr || p.series[i]->n < 1) return false;
-  return true;
+  // A bad cache must show "error: market_trends", not feed NaN/inf to the integer casts in the chart.
+  for (int i = 0; i < p.n; ++i)
+    for (int k = 0; k < p.series[i]->n; ++k)
+      if (!isfinite(p.series[i]->norm[k]) || p.series[i]->norm[k] <= 0) return false;
+  double lo, hi;
+  y_range(p.series, p.n, lo, hi);
+  return isfinite(lo) && isfinite(hi) && lo > 0 && hi > lo;
 }
 
 namespace mt_detail {

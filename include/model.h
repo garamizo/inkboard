@@ -53,8 +53,15 @@ inline void build_frame(Bitmap& frame, const Model& m, const char* version) {
   }
   if (l.has_market) {
     market_col.state = ColumnState::Ok;
+    // Spec §4.4: a rejected key needs the owner's action even while cached data exists.
+    bool rejected = false;
+    for (int i = 0; i < l.n_series; ++i) rejected = rejected || m.series[i].status.auth_rejected;
+    if (rejected) {
+      market_col.state = ColumnState::AuthRejected;
+      market_col.nodata_source = "fred";
+    }
     g_market = MarketPayload{l.n_series, {}, l.years, today};
-    for (int i = 0; i < l.n_series && market_col.state == ColumnState::Ok; ++i) {
+    for (int i = 0; i < l.n_series && market_col.state == ColumnState::Ok; ++i) {  // stops at AuthRejected
       const SeriesCache& c = m.series[i];
       // A cache from before a reflash with another series= list must not show under this series.
       if (!c.valid || strcmp(c.fred_id, CATALOG[l.series[i]].fred_id) != 0 || c.data.latest_date == INT32_MIN) {

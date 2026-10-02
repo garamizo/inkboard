@@ -237,6 +237,31 @@ void test_screen_auth_rejected() {
   check_screen("screen_auth_rejected", false);
 }
 
+void test_auth_rejected_overrides_cached_data() {
+  default_model(false);
+  static uint8_t expect[ink::FRAME_BYTES];
+  ink::Bitmap bm(g_frame, ink::FRAME_W, ink::FRAME_H);
+  test_screen_auth_rejected();                    // leaves the all-rejected frame in g_frame
+  memcpy(expect, g_frame, sizeof expect);
+  default_model(false);
+  g_model.series[0].status.auth_rejected = true;  // one series rejected, all caches still valid
+  ink::build_frame(bm, g_model, "fw 2.0.0");
+  TEST_ASSERT_EQUAL_MEMORY(expect, g_frame, sizeof expect);
+}
+
+void test_market_payload_rejects_non_finite() {
+  static ink::Summary a;
+  a.n = 2; a.norm[0] = 0.5; a.norm[1] = 1.2;
+  const ink::Summary* s[] = {&a, nullptr, nullptr, nullptr};
+  ink::MarketPayload p{1, {}, 5, FIXTURE_TODAY};
+  p.series[0] = s[0];
+  TEST_ASSERT_TRUE(ink::market_payload_ok(p));
+  a.norm[1] = NAN;
+  TEST_ASSERT_FALSE(ink::market_payload_ok(p));
+  a.norm[1] = INFINITY;
+  TEST_ASSERT_FALSE(ink::market_payload_ok(p));
+}
+
 void test_weather_from_other_location_not_shown() {
   default_model(false);
   g_model.weather.key.lat = 40.7;  // cache from before a reflash with another location
@@ -285,6 +310,8 @@ int main() {
   RUN_TEST(test_screen_nodata);
   RUN_TEST(test_screen_render_error);
   RUN_TEST(test_screen_auth_rejected);
+  RUN_TEST(test_auth_rejected_overrides_cached_data);
+  RUN_TEST(test_market_payload_rejects_non_finite);
   RUN_TEST(test_weather_from_other_location_not_shown);
   RUN_TEST(test_series_cache_of_other_series_not_shown);
   RUN_TEST(test_config_error_and_calibration);
