@@ -598,6 +598,9 @@ void test_record_failure_spacing() {
   r.retry_after_s = 900;
   ink::record_failure(s, r, 1000);
   TEST_ASSERT_EQUAL_INT64(1900, s.retry_not_before);
+  r.retry_after_s = 10'000'000;                              // a hostile header must not park the source
+  ink::record_failure(s, r, 1000);
+  TEST_ASSERT_EQUAL_INT64(1000 + 21600, s.retry_not_before);
   TEST_ASSERT_TRUE(s.last_attempt_failed);
   ink::record_success(s, 2000);
   TEST_ASSERT_FALSE(s.last_attempt_failed);

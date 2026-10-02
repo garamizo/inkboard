@@ -25,6 +25,7 @@ struct FakeOps {
   bool fs_ok = true, wifi_ok = true, sntp_ok = true, fred_bad_key = false, save_ok = true;
   int64_t clock = FIXTURE_NOW, sntp_time = FIXTURE_NOW;
   std::map<std::string, std::vector<uint8_t>> files;
+  std::vector<int32_t> fred_starts;  // observation_start of each FRED request
   std::vector<std::string> gets;  // "host series-or-weather", never the path (it has the key)
   int shows = 0, wifi_ups = 0;
   uint32_t t = 0;
@@ -80,7 +81,9 @@ struct FakeOps {
         r.http_status = 400;
       } else {
         const char* start = strstr(path, "observation_start=") + 18;
-        const bool tail = ink::parse_iso_date(std::string(start, 10).c_str()) == FIXTURE_TAIL_S0 + 1;
+        const int32_t from = ink::parse_iso_date(std::string(start, 10).c_str());
+        fred_starts.push_back(from);
+        const bool tail = from == FIXTURE_TAIL_S0 + 1;
         file = "fixtures/fred_" + sid + (tail ? "_tail.json" : "_full.json");
       }
     }
@@ -178,6 +181,28 @@ void test_hourly_wake_refreshes_weather_only() {
   TEST_ASSERT_EQUAL_size_t(1, ops.gets.size());
   TEST_ASSERT_EQUAL_STRING("weather", ops.gets[0].c_str());
   TEST_ASSERT_EQUAL_INT(2, ops.shows);  // footer moved to 11:01 AM
+}
+
+void test_fred_ttl_wake_fetches_tails() {
+  FakeOps ops;
+  Rtc rtc = cold();
+  cycle(ops, rtc);
+  int64_t full_at[4];
+  for (int i = 0; i < 4; ++i) full_at[i] = g_work.model.series[i].full_fetched_at;
+  ops.gets.clear();
+  ops.fred_starts.clear();
+  ops.clock += 6 * 3600 + 60;  // FRED TTL passed: a tail, not a full refetch
+  ops.sntp_time = ops.clock;
+  cycle(ops, rtc);
+  TEST_ASSERT_EQUAL_size_t(5, ops.gets.size());  // weather + 4 FRED
+  TEST_ASSERT_EQUAL_STRING("weather", ops.gets[0].c_str());
+  TEST_ASSERT_EQUAL_size_t(4, ops.fred_starts.size());
+  for (int32_t from : ops.fred_starts) TEST_ASSERT_EQUAL_INT32(FIXTURE_TAIL_S0 + 1, from);
+  for (int i = 0; i < 4; ++i) {
+    TEST_ASSERT_EQUAL_INT64(full_at[i], g_work.model.series[i].full_fetched_at);
+    TEST_ASSERT_TRUE(g_work.model.series[i].full_fetched_at > 0);
+  }
+  TEST_ASSERT_EQUAL_UINT8(0, rtc.fail_count);
 }
 
 void test_offline_keeps_frame_until_stale() {
@@ -313,6 +338,7 @@ int main() {
   RUN_TEST(test_cold_boot_fetches_renders_shows);
   RUN_TEST(test_nothing_due_skips_wifi_and_unchanged_frame_is_not_shown);
   RUN_TEST(test_hourly_wake_refreshes_weather_only);
+  RUN_TEST(test_fred_ttl_wake_fetches_tails);
   RUN_TEST(test_offline_keeps_frame_until_stale);
   RUN_TEST(test_cold_boot_offline_leaves_panel_alone);
   RUN_TEST(test_sntp_fails_date_header_sets_clock);

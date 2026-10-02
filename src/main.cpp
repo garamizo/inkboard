@@ -5,6 +5,7 @@
 #include <driver/gpio.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <soc/soc_caps.h>
 #include <sys/time.h>
 
@@ -82,6 +83,32 @@ static bool clock_survives(esp_reset_reason_t r) {
   }
 }
 
+// The 8 KB default left 1.8 KB free during TLS (measured high-water), too thin.
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+
+// A normal cycle takes well under a minute. HTTPClient's per-character read timeout restarts
+// on every byte, so a server trickling headers can hold a wake forever; this bounds the whole
+// cycle and sleeps the usual retry interval instead.
+static constexpr uint64_t CYCLE_WATCHDOG_US = 120ULL * 1000000ULL;
+static constexpr int32_t WATCHDOG_SLEEP_S = 300;
+static void deep_sleep(int32_t seconds);
+static esp_timer_handle_t g_watchdog;
+
+static void watchdog_fired(void*) {
+  Serial.println("cycle watchdog: cycle exceeded 120 s, sleeping");
+  deep_sleep(WATCHDOG_SLEEP_S);
+}
+
+static void arm_watchdog() {
+  if (!g_watchdog) {
+    esp_timer_create_args_t args = {};
+    args.callback = watchdog_fired;
+    args.name = "cycle_wd";
+    if (esp_timer_create(&args, &g_watchdog) != ESP_OK) return;
+  }
+  esp_timer_start_once(g_watchdog, CYCLE_WATCHDOG_US);
+}
+
 static void deep_sleep(int32_t seconds) {
   Serial.printf("sleeping %ld s\n", static_cast<long>(seconds));
   Serial.flush();
@@ -122,8 +149,10 @@ void setup() {
 // otherwise, or once unplugged, it deep-sleeps the rest. Deep sleep never returns: the next
 // timer wake starts again at setup().
 void loop() {
+  arm_watchdog();
   const int32_t sleep_s =
       wake::run_cycle(g_ops, g_rtc, g_work, FRAME_QUERY, g_version, USE_CALIBRATION_PATTERN, FALLBACK_SLEEP_S);
+  if (g_watchdog) esp_timer_stop(g_watchdog);
   Serial.printf("heap: free %u, min %u; loop stack high-water %u bytes free\n",
                 static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMinFreeHeap()),
                 static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));

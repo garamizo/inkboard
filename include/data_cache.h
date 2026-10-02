@@ -20,6 +20,9 @@ constexpr int64_t FRED_TTL_S = 21600;
 constexpr int64_t STALE_GRACE_S = 5400;     // base.py: stale once 90 min past the TTL
 constexpr int64_t FULL_REFETCH_S = 7 * 86400;
 constexpr int64_t RETRY_SPACING_S = 300;    // base.py retry_after
+// Cap on a server's Retry-After: the spacing persists in LittleFS across reflashes. Equals
+// wake_logic.h MAX_SLEEP_S (not included here).
+constexpr int64_t MAX_RETRY_SPACING_S = 21600;
 
 struct SourceStatus {
   int64_t fetched_at = 0;  // last success (unix s)
@@ -61,7 +64,9 @@ inline void record_success(SourceStatus& s, int64_t now) {
 inline void record_failure(SourceStatus& s, const FetchResult& r, int64_t now) {
   s.last_attempt_failed = true;
   s.auth_rejected = r.auth_error;
-  s.retry_not_before = now + (r.retry_after_s > RETRY_SPACING_S ? r.retry_after_s : RETRY_SPACING_S);
+  int64_t spacing = r.retry_after_s > RETRY_SPACING_S ? r.retry_after_s : RETRY_SPACING_S;
+  if (spacing > MAX_RETRY_SPACING_S) spacing = MAX_RETRY_SPACING_S;
+  s.retry_not_before = now + spacing;
 }
 
 struct WeatherKey {
