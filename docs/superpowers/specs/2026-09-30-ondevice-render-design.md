@@ -336,3 +336,16 @@ Notes for the firmware:
 - `sntp_get_sync_status()` returns `COMPLETED` once and then resets; read it once per sync.
 - If a host process keeps the old `/dev/ttyACM*` node open across a deep-sleep wake, the board comes
   back under a new node (`ttyACM1`); tools that wait for the board should glob `ttyACM*`.
+
+### On-board results (Task 19, 2026-10-01)
+
+Per the owner's request, checks ran on the dev build (deep sleep off) and the production build was flashed
+last; the long battery run was skipped.
+
+| Check | Result |
+|---|---|
+| First cycle (cold, empty caches) | weather + 4 FRED full fetches HTTP 200; full panel refresh 2.6 s; next update at hh:01 |
+| Heap / stack after a cycle | free ≥ 126 KB minimum during TLS; loop stack high-water 1,820 B free of 8 KB |
+| RESET (power-on, clock lost) | SNTP resynced the clock; no fetches (caches fresh from LittleFS); panel redrawn (cold boot is dirty) |
+| Production build with a computer on USB | stays awake ("computer on USB"), schedules hh:01; deep sleep starts once unplugged |
+| Firmware size | RAM 164,928 B (50.3 %), Flash 1,414,972 / 1,966,080 B (72.0 %) |
