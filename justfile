@@ -133,14 +133,13 @@ check:
 flash ENV="supermini-c6":
     pio run -e {{ENV}} -t upload -t monitor
 
-# Dev build against this machine's `just dev` (deep sleep off; Linux). ENV: supermini-c6, smoke, minimal.
+# Dev build: deep sleep off, version with the git hash (Linux). ENV: supermini-c6, smoke, minimal.
 flash-dev ENV="supermini-c6":
     #!/usr/bin/env bash
     set -euo pipefail
-    url="${INKBOARD_DEV_URL:-http://$(hostname -I | awk '{print $1}'):8765}"
     export INKBOARD_VERSION="$(cat VERSION)-$(git rev-parse --short HEAD)"
-    echo "dev firmware $INKBOARD_VERSION -> $url (keep 'just dev' running here)"
-    export PLATFORMIO_BUILD_FLAGS="-DSERVER_URL=\\\"$url\\\" -DINKBOARD_DEEP_SLEEP=0"
+    echo "dev firmware $INKBOARD_VERSION (deep sleep off)"
+    export PLATFORMIO_BUILD_FLAGS="-DINKBOARD_DEEP_SLEEP=0"
     pio run -e {{ENV}}
     # The board's USB port only exists while it is awake (a few seconds per wake). Wait for
     # it, then upload at once: esptool resets the chip into the bootloader over USB itself.

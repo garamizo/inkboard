@@ -67,7 +67,7 @@ class Bitmap {  // 1-bit, rows of (w + 7) / 8 bytes, bit 1 = white
 // ---- Ports of Pillow's rasterizers (Draw.c). Coordinates here are bitmap pixels. ----
 namespace pil {
 
-constexpr double PI = 3.14159265358979323846;
+constexpr double kPi = 3.14159265358979323846;
 
 // Draw.c ROUND_UP / ROUND_DOWN. With a float argument C adds 0.5F in float but fabs()
 // promotes to double, so the two signs round at different precisions; keep that.
@@ -472,12 +472,12 @@ inline void arc_init(ClipEllipseState* s, int32_t a, int32_t b, int32_t w, float
   ClipNode* rc = s->nodes + s->node_count++;
   lc->l = lc->r = rc->l = rc->r = nullptr;
   lc->type = rc->type = CT_CLIP;
-  lc->a = -a * sin(al * PI / 180.0);
-  lc->b = b * cos(al * PI / 180.0);
-  lc->c = (a * a - b * b) * sin(al * PI / 90.0) / 2.0;
-  rc->a = a * sin(ar * PI / 180.0);
-  rc->b = -b * cos(ar * PI / 180.0);
-  rc->c = (b * b - a * a) * sin(ar * PI / 90.0) / 2.0;
+  lc->a = -a * sin(al * kPi / 180.0);
+  lc->b = b * cos(al * kPi / 180.0);
+  lc->c = (a * a - b * b) * sin(al * kPi / 90.0) / 2.0;
+  rc->a = a * sin(ar * kPi / 180.0);
+  rc->b = -b * cos(ar * kPi / 180.0);
+  rc->c = (b * b - a * a) * sin(ar * kPi / 90.0) / 2.0;
   if (fmod(static_cast<double>(al), 180) == 0 || fmod(static_cast<double>(ar), 180) == 0) {
     s->root = s->nodes + s->node_count++;
     s->root->l = lc;
@@ -519,8 +519,8 @@ inline void arc_init(ClipEllipseState* s, int32_t a, int32_t b, int32_t w, float
 inline void pie_init(ClipEllipseState* s, int32_t a, int32_t b, int32_t w, float al, float ar) {
   ellipse_init(&s->st, a, b, w);
   s->node_count = 0;
-  const double xl = a * cos(al * PI / 180.0), xr = a * cos(ar * PI / 180.0);
-  const double yl = b * sin(al * PI / 180.0), yr = b * sin(ar * PI / 180.0);
+  const double xl = a * cos(al * kPi / 180.0), xr = a * cos(ar * kPi / 180.0);
+  const double yl = b * sin(al * kPi / 180.0), yr = b * sin(ar * kPi / 180.0);
   ClipNode* lc = s->nodes + s->node_count++;
   ClipNode* rc = s->nodes + s->node_count++;
   lc->l = lc->r = rc->l = rc->r = nullptr;

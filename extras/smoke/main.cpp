@@ -8,8 +8,8 @@
 //      then a soak test that runs until reset: a status line updated with a
 //      partial refresh every second, and the whole pattern redrawn with a
 //      full refresh every 10 minutes
-//   5. Network: joins Wi-Fi with include/secrets.h and fetches SERVER_URL/v1/test.bin
-//      (`just flash-dev smoke` points SERVER_URL at this machine's dev server)
+//   5. Network: joins Wi-Fi with include/secrets.h and fetches a tiny Open-Meteo forecast over
+//      HTTPS (separates Wi-Fi, firewall and TLS problems)
 // Press BOOT to run the wiring check and display test again.
 
 #include <Arduino.h>
@@ -105,8 +105,8 @@ static void checkWifi() {
   WiFi.mode(WIFI_OFF);
 }
 
-// Joins Wi-Fi with the dashboard's credentials and fetches the calibration frame from the
-// same server the dashboard firmware uses: separates Wi-Fi, LAN/firewall and TLS problems.
+// Joins Wi-Fi with the dashboard's credentials and fetches a tiny Open-Meteo forecast over
+// HTTPS (separates Wi-Fi, firewall and TLS problems).
 static void checkNetwork() {
   banner("Network");
 #ifndef WIFI_SSID
@@ -125,30 +125,24 @@ static void checkNetwork() {
   Serial.printf("PASS: Wi-Fi joined in %lu ms, ip %s, gateway %s, %d dBm\n", millis() - start,
                 WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(), WiFi.RSSI());
 
-  String url = String(SERVER_URL) + "/v1/test.bin";
-  bool tls = url.startsWith("https://");
+  const char* url = "https://api.open-meteo.com/v1/forecast?latitude=0&longitude=0&current=temperature_2m";
   NetworkClientSecure secure;
-  NetworkClient plain;
-  if (tls) {
-    secure.setCACert(CA_BUNDLE_PEM);
-    secure.setHandshakeTimeout(10);
-  }
+  secure.setCACert(CA_BUNDLE_PEM);
+  secure.setHandshakeTimeout(10);
   HTTPClient http;
   http.setConnectTimeout(8000);
   http.setTimeout(10000);
-  Serial.printf("GET %s\n", url.c_str());
+  Serial.printf("GET %s\n", url);
   start = millis();
-  if (!http.begin(tls ? static_cast<NetworkClient&>(secure) : plain, url)) {
-    Serial.println("FAIL: bad SERVER_URL");
+  if (!http.begin(secure, url)) {
+    Serial.println("FAIL: bad URL");
   } else {
     int code = http.GET();
     if (code < 0) {
-      Serial.printf("FAIL: %s after %lu ms (server down, firewall, or router isolating Wi-Fi clients)\n",
-                    HTTPClient::errorToString(code).c_str(), millis() - start);
+      Serial.printf("FAIL: %s after %lu ms (firewall, DNS, or TLS)\n", HTTPClient::errorToString(code).c_str(),
+                    millis() - start);
     } else {
-      int size = http.getSize();
-      Serial.printf("%s: HTTP %d, %d bytes in %lu ms\n", code == 200 && size == 48000 ? "PASS" : "WARN",
-                    code, size, millis() - start);
+      Serial.printf("%s: HTTP %d in %lu ms\n", code == 200 ? "PASS" : "WARN", code, millis() - start);
     }
     http.end();
   }
