@@ -349,6 +349,7 @@ last; the long battery run was skipped.
 | RESET (power-on, clock lost) | SNTP resynced the clock; no fetches (caches fresh from LittleFS); panel redrawn (cold boot is dirty) |
 | Production build with a computer on USB | stays awake ("computer on USB"), schedules hh:01; deep sleep starts once unplugged |
 | Firmware size | RAM 164,928 B (50.3 %), Flash 1,414,972 / 1,966,080 B (72.0 %) |
+| v2.0.0 (16 KB loop stack, watchdog, 4 CA roots) | flashed 21:48; USB reset → clock synced, panel refreshed; loop stack high-water 9,980 B free of 16 KB; Flash 1,417,254 B (72.1 %) |
 
 Task 19 failure-table rows (Wi-Fi off, bad FRED key, bad query, cold boot offline, calibration) were not
 run on hardware, at the owner's request to save time. Those paths are covered by the host cycle tests in
