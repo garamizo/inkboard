@@ -1,7 +1,8 @@
 # inkboard
 
-Firmware for a 7.5" e-paper desk dashboard built on an ESP32-C6. What it shows is still open:
-calendar, weather, reminders, home status.
+Firmware for a 7.5" e-paper desk dashboard built on an ESP32-C6. The board fetches weather
+(Open-Meteo) and market data (FRED) itself and renders the 800×480 screen on the device, so
+there is no server to run: it wakes, updates the panel and deep-sleeps.
 
 **Hardware:** ESP32-C6 SuperMini + Waveshare e-Paper Driver HAT (rev 2.3) + Waveshare 7.5" V2
 (800×480 B/W) in the [Smart E-Paper Desk Dashboard](https://makerworld.com/en/models/2443888-smart-e-paper-desk-dashboard-esp32-7-5)
@@ -12,11 +13,7 @@ case.
 
 ## First-time setup
 
-There are two roles. A **board owner** only builds and flashes the firmware; the board talks to
-the public server at `https://inkboard.signalwave.dev`. A **server provider** runs that render
-server (API keys, Docker, Cloudflare Tunnel). Most people only need the first section.
-
-### Board owner (Linux or Windows): Wi-Fi + flash
+### Linux or Windows: Wi-Fi + flash
 
 You need the assembled board ([docs/wiring.md](docs/wiring.md)), a USB-C data cable and a
 2.4 GHz Wi-Fi network (the ESP32-C6 has no 5 GHz radio).
@@ -52,8 +49,11 @@ You need the assembled board ([docs/wiring.md](docs/wiring.md)), a USB-C data ca
    two PlatformIO versions building the same project delete each other's build files
    ([#1](https://github.com/garamizo/inkboard/issues/1)).
 
-3. **Set your Wi-Fi credentials:** fill in `WIFI_SSID` and `WIFI_PASSWORD` in
-   `include/secrets.h`. The file is gitignored, so your password never gets committed.
+3. **Set your Wi-Fi credentials and FRED key:** fill in `WIFI_SSID`, `WIFI_PASSWORD` and
+   `FRED_API_KEY` in `include/secrets.h`. Get the key free at
+   [fredaccount.stlouisfed.org/apikeys](https://fredaccount.stlouisfed.org/apikeys); it is only
+   needed when the layout uses `market_trends`. The file is gitignored, so your password and
+   key never get committed.
 
    Optional: set your location and widgets, see
    [Change the dashboard layout](#change-the-dashboard-layout).
@@ -69,58 +69,10 @@ You need the assembled board ([docs/wiring.md](docs/wiring.md)), a USB-C data ca
    minutes. If the upload can't connect, the board is probably in deep sleep: tap **RESET**
    (not BOOT) and run `just flash` again. The board wakes, sees the computer and stays awake. More troubleshooting: [docs/smoke-test.md](docs/smoke-test.md).
 
-### Server provider (Linux): API keys + deploy
-
-The render server lives in `server/` (Python, served by Docker Compose). It is published
-through a Cloudflare Tunnel, so no router port is opened. You need Linux with Docker (Compose
-v2), git, just and uv.
-
-1. **Clone and run setup:**
-
-   ```bash
-   git clone https://github.com/garamizo/inkboard.git ~/inkboard
-   cd ~/inkboard
-   just setup-server
-   ```
-
-   `just setup-server` checks for Docker Compose, installs the Python dependencies, creates
-   `server/.env` from `server/.env.example`, lists the keys that are still empty and runs the
-   server tests (no network needed).
-
-2. **Fill in `server/.env`.** It is gitignored; never commit it.
-
-   | Variable | Where to get it |
-   |---|---|
-   | `FRED_API_KEY` | Free key from [fredaccount.stlouisfed.org/apikeys](https://fredaccount.stlouisfed.org/apikeys) (market data). Weather (Open-Meteo) needs no key. |
-   | `CLOUDFLARE_TUNNEL_TOKEN` | Cloudflare Zero Trust → Networks → Tunnels: the token after `--token`. One-time tunnel, DNS, cache and bot settings: [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md). |
-   | `LOG_LEVEL` | Optional, default `INFO`. |
-
-3. **Try it locally:** `just dev` serves on port 8765 with auto-reload and reads
-   `server/.env`. It never touches production. Preview a frame at
-   `http://127.0.0.1:8765/v1/frame.png?w=market_trends:2/3,calendar_weather:1/3&lat=34.05&lon=-118.24&tz=America/Los_Angeles`.
-   To point a board at it, use `just flash-dev` (see [docs/dashboard-bringup.md](docs/dashboard-bringup.md)).
-
-4. **Deploy:** `just up` builds and starts the server and `cloudflared` from a clean checkout
-   of `main`, and refuses to run without both keys. Then:
-
-   ```bash
-   just check           # local + public health checks, opens the public frame
-   just logs cloudflared   # expect "Registered tunnel connection"
-   just down            # stop (the public site goes offline)
-   ```
-
-   The containers restart on their own after a reboot (`restart: unless-stopped`).
-
-**Hosting under a different domain:** change `SERVER_URL` in `include/config.h` (and have
-your board owners reflash), `public_url` in the `justfile`, and the tunnel's public hostname.
-The firmware trusts only the root CAs in `include/ca_certs.h` (the ones Cloudflare's edge
-uses); regenerate it with `tools/gen_ca_certs.sh` if your certificate chains to another root.
-
 ## Change the dashboard layout
 
-The board sends its whole layout to the server as a query string: `FRAME_QUERY` in
-`include/config.h`. The server keeps nothing per board, so a new layout only needs a
-reflash, not a server change.
+The board's whole layout is one query string: `FRAME_QUERY` in `include/config.h`. A new
+layout only needs a reflash.
 
 ```c
 #define FRAME_QUERY \
@@ -144,10 +96,10 @@ reflash, not a server change.
    Series ids: `sp500` (S&P 500), `btc` (Bitcoin), `mortgage30` (30-year mortgage rate),
    `home_la` (LA median home listing price), `ust10y` (10-year Treasury), `usd_broad`
    (dollar index).
-3. **Preview it in a browser** before flashing:
-   `https://inkboard.signalwave.dev/v1/frame.png?<your FRAME_QUERY>`. A mistake returns a
-   one-line error instead of an image (e.g. `lat: not used by any widget in w`). The
-   server's home page, `https://inkboard.signalwave.dev/`, lists every widget and series.
+3. **Preview it on this computer:** `just preview` (or `just preview "<query>"`) writes
+   `.pio/preview.png`. A mistake prints a one-line error instead (e.g. `lat: not used by any
+   widget in w`). `just preview "" --fixtures` renders offline from recorded data; to pass
+   several flags, quote them as one string: `just preview "" "--fixtures --out x.png"`.
 4. **Flash** with `just flash`. The new layout shows on the next update.
 
 Examples:
@@ -158,36 +110,37 @@ w=market_trends:1&series=sp500,btc,ust10y,usd_broad&years=10&tz=America/Chicago
 w=calendar_weather:1/3,market_trends:2/3&lat=51.5&lon=-0.1&tz=Europe/London&units=metric&series=sp500,ust10y
 ```
 
-New widget types or market series are server changes: widgets live in
-`server/inkboard_server/widgets/` and series in `server/inkboard_server/series.py`. If you run
-the server, also update `query` in the `justfile` (used by `just check`) when you change the
-default layout.
+New widget types or market series are firmware changes: widgets live in `include/widgets/` and
+series in `include/series.h`.
 
 ## Repository layout
 
 ```
 VERSION              release version (dashboard footer, board User-Agent); dev builds add -<git hash>
 platformio.ini       build config (pinned platform + libraries)
-justfile             common commands: `just` lists them (test, up, check, preview, flash, ...)
+justfile             common commands: `just` lists them (test, preview, flash, ...)
 include/pins.h       every GPIO assignment, mirrors docs/wiring.md
-src/                 dashboard firmware (thin client, see docs/dashboard-bringup.md)
+include/render/      canvas, text, bitmap fonts, icons, PNG writer (portable, host-tested)
+include/widgets/     calendar_weather and market_trends
+include/sources/     Open-Meteo and FRED clients (streaming JSON parsers)
+src/                 dashboard firmware: Wi-Fi, TLS, clock, display, deep sleep (docs/dashboard-bringup.md)
 extras/smoke/        hardware smoke test + refresh soak test (pio run -e smoke)
 extras/minimal/      bare display check (pio run -e minimal), mirrors the kit's firmware
-server/              render server (Python): widgets, data sources, HTTP API
+tools/               generators: fonts, time-zone table, fixtures, Pillow reference images
+test/                host test suites, recorded fixtures, golden PNGs, reference images
 docs/
   hardware.md        what each board does, how the e-paper HAT works
   wiring.md          connection table, pin budget, battery + speaker plans
   smoke-test.md      flashing, expected output, troubleshooting
   toolchain.md       language / framework choice and commands
-  cloudflare-tunnel.md  publishing the server at inkboard.signalwave.dev
 ```
 
 ## Roadmap
 
 - [x] Hardware smoke test
 - [ ] Wi-Fi provisioning + NTP clock
-- [x] Dashboard layout engine (server-rendered widgets, see server/)
-- [x] Data sources (FRED markets, Open-Meteo weather)
+- [x] Dashboard layout engine (widgets rendered on the board)
+- [x] Data sources (FRED markets, Open-Meteo weather, fetched by the board)
 - [x] Deep-sleep update cycle (battery voltage still to do)
 - [ ] Speaker output (I2S)
 - [ ] OTA updates

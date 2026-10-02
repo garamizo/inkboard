@@ -1,5 +1,5 @@
 #pragma once
-// FRAME_QUERY -> Layout (spec §1.1). Port of server/inkboard_server/query.py and
+// FRAME_QUERY -> Layout (spec §1.1). Port of the removed Python server's query.py and
 // widgets/params.py with the same one-line messages (they reach the config error screen).
 // Deviations: Python's float()/int() also accept "_" digit separators; these parsers don't.
 // A decoded NUL byte, a key over 31 bytes, a value over 255 bytes or more than 16 pairs is

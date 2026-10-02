@@ -1,6 +1,6 @@
 #pragma once
 // Market trends: several series on one log chart, each divided by its own window mean
-// (spec §3.3). Port of server/inkboard_server/widgets/market_trends.py.
+// (spec §3.3). Port of the removed Python server's widgets/market_trends.py.
 #include <math.h>
 #include <stdio.h>
 #include <string.h>

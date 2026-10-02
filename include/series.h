@@ -1,5 +1,5 @@
 #pragma once
-// Market series a board can show (spec §1.1). Port of server/inkboard_server/series.py.
+// Market series a board can show (spec §1.1). Port of the removed Python server's series.py.
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>

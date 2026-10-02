@@ -1,6 +1,6 @@
 #pragma once
 // Weekly grid, normalization and chart range for market_trends (spec §2.5).
-// Port of server/inkboard_server/market_data.py on top of the Sunday cache.
+// Port of the removed Python server's market_data.py on top of the Sunday cache.
 #include <math.h>
 #include <stdint.h>
 

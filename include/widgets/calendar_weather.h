@@ -1,6 +1,6 @@
 #pragma once
 // Weather-first calendar: current conditions, forecast rows, date and month grid
-// (spec §3.3). Port of server/inkboard_server/widgets/calendar_weather.py.
+// (spec §3.3). Port of the removed Python server's widgets/calendar_weather.py.
 #include <math.h>
 #include <stdio.h>
 

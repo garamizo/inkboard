@@ -51,14 +51,14 @@ void test_marker_positions_and_y_at() {
   TEST_ASSERT_EQUAL_DOUBLE(0.0, ink::y_at(pts, 3, 25));
 }
 
-// Reference = the server's own render of the same data (tools/ref_render.py). Primitives and
+// Reference = the server's own render of the same data (recorded in test/reference/). Primitives and
 // text match Pillow exactly (Tasks 4-5), so any difference here comes from the port itself.
 static void check_reference(const char* name, const uint8_t* bits, int w, int h) {
   char rel[96];
   snprintf(rel, sizeof rel, "reference/widgets/%s.pbm", name);
   const long diff = ink_test::match_reference(rel, bits, w, h);
   printf("%s: %ld pixels differ from the server render\n", name, diff);
-  TEST_ASSERT_TRUE_MESSAGE(diff >= 0, "missing reference: run tools/ref_render.py");
+  TEST_ASSERT_TRUE_MESSAGE(diff >= 0, "missing reference: reference PBMs are committed data");
   TEST_ASSERT_TRUE_MESSAGE(diff <= w * h / 200, name);  // > 0.5 %: a layout bug, not rounding
   ink_test::golden(name, bits, w, h);
 }

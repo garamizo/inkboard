@@ -1,16 +1,11 @@
 # Dashboard bring-up
 
-Checks the thin-client firmware on real hardware (spec §7.3). Do them in order; record
-results in the table at the end.
+Checks the firmware on real hardware. Do them in order; record results in the table at the end.
 
 **Before you start:**
-- `include/secrets.h` has your Wi-Fi credentials (copy it from `include/secrets.h.example`).
-- A server is reachable. Pick one:
-  - **Production:** `just check` shows the public URL working. Flash with `just flash`.
-  - **Dev server on the LAN:** run `just dev` on this machine and flash with
-    `just flash-dev`, which points the firmware at `http://<this machine's LAN IP>:8765`.
-    You don't need to deploy anything or set up the tunnel for this.
-- The serial monitor shows `GET -> <status>` and `sleeping <s> s` on each wake.
+- `include/secrets.h` has your Wi-Fi credentials and your FRED API key (copy it from
+  `include/secrets.h.example`; the key is free at https://fredaccount.stlouisfed.org/apikeys).
+- The serial monitor shows `sleeping <s> s` after each wake.
 - `just flash-dev` builds with deep sleep **off** (`INKBOARD_DEEP_SLEEP=0`): the dev board
   waits awake between updates, so USB and logs are always there. Prod (`just flash`) keeps
   deep sleep on.
@@ -37,24 +32,23 @@ Set `USE_CALIBRATION_PATTERN 1` in `include/config.h`, then flash (`just flash` 
 Then set `USE_CALIBRATION_PATTERN 0` again.
 
 ## 2. First frame
-Flash again. The panel should match `SERVER_URL/v1/frame.png?<FRAME_QUERY>` in a
-browser (or `just check`), and serial should show `GET -> 200`.
+Flash again. The panel should match `just preview` (`.pio/preview.png`), and serial should
+show the weather and FRED fetches succeeding and then `sleeping <s> s`.
 
-## 3. Unchanged frame
-Press RESET within the same data cycle (a few minutes after step 2). Serial should show
-`GET -> 304`, and the panel must not flash.
+## 3. Cached data
+Press RESET within the same data cycle (a few minutes after step 2). Serial should show no
+fetches (the caches in flash are fresh), and the panel shows the same dashboard.
 
 ## 4. Offline badge
-Stop the server (stop `just dev`; for production, `just down` on the server) and let the board wake three times.
+Turn off the Wi-Fi router and let the board wake three times.
 - That takes 5 + 15 + 60 min; pressing RESET runs a wake immediately.
 - On the third failure the **"offline since h:mm"** badge appears bottom-right, over the
   intact last dashboard.
 - Power-cycle the board (unplug it) while it's still offline. The stored frame survives,
   and after three more failures the badge is drawn over it again. Its time now says just
   "offline", because RTC memory was lost.
-Restart the server, then press RESET: the next wake gets a 304 and redraws the clean frame
-without the badge. Repeat once with a power cut while the badge is showing, restarting the
-server right away: the first wake after power-up also redraws the clean frame.
+Turn the Wi-Fi back on, then press RESET: the next wake redraws the clean frame without the
+badge.
 
 ## 5. Config error
 Set `FRAME_QUERY` to `"w=market_trends:2/3"` and flash. The error screen shows
@@ -74,7 +68,7 @@ Record both in `docs/hardware.md` (Design notes for battery life).
 |---|---|---|---|
 | 1 Orientation | | | |
 | 2 First frame | | | |
-| 3 Unchanged frame | | | |
+| 3 Cached data | | | |
 | 4 Offline badge | | | |
 | 5 Config error | | | |
 | 6 Power | | | |

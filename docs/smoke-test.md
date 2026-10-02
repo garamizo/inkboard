@@ -15,9 +15,8 @@ assemble the case, while the wires are still easy to reach.
    pio run -e smoke -t upload -t monitor
    ```
 
-   `just flash smoke` does the same; its network check fetches from the public server.
-   `just flash-dev smoke` points the check at this machine's `just dev` server instead, and
-   waits for a sleeping board to wake before uploading.
+   `just flash smoke` does the same; its network check fetches from Open-Meteo.
+   `just flash-dev smoke` also waits for a sleeping board to wake before uploading.
 
    If the upload can't connect, tap **RESET** and retry (a sleeping board wakes and stays
    awake while a computer is on USB). If that still fails, hold **BOOT**, tap **RESET**,

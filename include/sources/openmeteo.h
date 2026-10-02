@@ -1,6 +1,6 @@
 #pragma once
 // Open-Meteo forecast: request path and streaming parser (spec §2.4).
-// Port of server/inkboard_server/sources/openmeteo.py.
+// Port of the removed Python server's sources/openmeteo.py.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,5 +1,7 @@
 # inkboard dashboard: server-rendered widgets
 
+> **Superseded in part (2026-09-30):** rendering moved onto the board; see 2026-09-30-ondevice-render-design.md. §1–§3 and §6 describe the removed server; §4–§5 still define the widgets.
+
 **Date:** 2026-09-27 · **Status:** design approved in brainstorming, awaiting spec review
 **Branch:** `feat/dashboard`
 

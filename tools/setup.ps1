@@ -21,5 +21,5 @@ if (Test-Path include\secrets.h) {
     Write-Host "Wi-Fi: include\secrets.h exists"
 } else {
     Copy-Item include\secrets.h.example include\secrets.h
-    Write-Host "Wi-Fi: created include\secrets.h; put your network name and password in it"
+    Write-Host "Wi-Fi: created include\secrets.h; put your Wi-Fi name and password and your FRED API key in it"
 }
