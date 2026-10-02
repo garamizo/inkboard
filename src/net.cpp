@@ -9,18 +9,26 @@
 #include "ca_certs.h"
 #include "config.h"
 #include "http_time.h"
+#if !__has_include("secrets.h")
+#error "Copy include/secrets.h.example to include/secrets.h and fill it in."
+#endif
 #include "secrets.h"
 #include "wake_logic.h"
 
 // Feeds the body straight into the JSON tokenizer, so nothing is buffered (spec §2.6), and
-// enforces the wake's deadline: a short write makes writeToStream() stop with an error.
+// enforces the wake's deadline: past it, the write error flag makes writeToStream() stop (a bare
+// short write is not enough: on a stalled connection it is called with 0 bytes after each read
+// timeout, and 0 == 0 reads as success).
 // writeToStream() wants a Stream; only the write side is used.
 class ParserSink : public Stream {
  public:
   ParserSink(ink::json::Parser& p, uint32_t deadline_ms) : p_(p), deadline_(deadline_ms) {}
   size_t write(uint8_t c) override { return write(&c, 1); }
   size_t write(const uint8_t* b, size_t n) override {
-    if (static_cast<int32_t>(millis() - deadline_) >= 0) return 0;
+    if (static_cast<int32_t>(millis() - deadline_) >= 0) {
+      setWriteError();
+      return 0;
+    }
     return p_.feed(reinterpret_cast<const char*>(b), n) ? n : 0;
   }
   int available() override { return 0; }
@@ -95,24 +103,27 @@ ink::FetchResult net_get(const char* host, const char* path, ink::json::Handler&
     g_http->setUserAgent("inkboard/" INKBOARD_VERSION);
     g_host = host;
   }
-  // Connect, TLS and each wait for data are bounded by what is left of the budget (at most
-  // 8/10/10 s); the body as a whole by the deadline in ParserSink.
+  // The connect, TLS handshake and header/data waits each get at most 8/10/10 s of what is left
+  // (they are not combined); the body as a whole is bounded by the deadline in ParserSink.
   const uint32_t step = timeout_ms < 10000 ? timeout_ms : 10000;
   g_client->setHandshakeTimeout(step / 1000);
   g_http->setConnectTimeout(step < 8000 ? step : 8000);
   g_http->setTimeout(step);
-  static const char* keys[] = {"Date", "Retry-After"};
-  g_http->collectHeaders(keys, 2);
+  static const char* keys[] = {"Date", "Retry-After", "Transfer-Encoding"};
+  g_http->collectHeaders(keys, 3);
   if (!g_http->begin(*g_client, host, 443, path, true)) return r;
   r.http_status = g_http->GET();
   r.date_epoch = httptime::parse_http_date(g_http->header("Date").c_str());
   r.retry_after_s = wake::parse_seconds(g_http->header("Retry-After").c_str());
   if (r.http_status == 200 || r.http_status == 400 || r.http_status == 403) {  // 4xx bodies explain a bad key
-    ink::json::Parser p(h);
-    ParserSink sink(p, deadline);
     const int size = g_http->getSize();
-    const int written = g_http->writeToStream(&sink);
-    r.complete = written >= 0 && (size < 0 || written == size) && p.finish();
+    // Spec §2.6: Content-Length or chunked only; a close-delimited body can't be told from a truncated one.
+    if (size >= 0 || g_http->header("Transfer-Encoding").equalsIgnoreCase("chunked")) {
+      ink::json::Parser p(h);
+      ParserSink sink(p, deadline);
+      const int written = g_http->writeToStream(&sink);
+      r.complete = written >= 0 && (size < 0 || written == size) && p.finish();
+    }
   }
   g_http->end();
   if (!r.complete) net_close();  // a broken or half-read session must not be reused

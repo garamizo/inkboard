@@ -26,13 +26,19 @@
 static constexpr bool same_text(const char* a, const char* b) {
   return *a == *b && (*a == '\0' || same_text(a + 1, b + 1));
 }
-static constexpr bool starts_with(const char* s, const char* p) { return *p == '\0' || (*s == *p && starts_with(s + 1, p + 1)); }
-static constexpr bool contains(const char* s, const char* p) { return *s != '\0' && (starts_with(s, p) || contains(s + 1, p)); }
+static constexpr bool starts_with(const char* s, const char* p) {
+  return *p == '\0' || (*s == *p && starts_with(s + 1, p + 1));
+}
+static constexpr bool contains(const char* s, const char* p) {
+  return *s != '\0' && (starts_with(s, p) || contains(s + 1, p));
+}
 static_assert(!same_text(WIFI_SSID, "your-network"), "Put your Wi-Fi credentials in include/secrets.h");
 static_assert(!contains(FRAME_QUERY, "market_trends") ||
                   !(same_text(FRED_API_KEY, "") || same_text(FRED_API_KEY, "your-fred-api-key")),
               "FRAME_QUERY uses market_trends: put your FRED_API_KEY in include/secrets.h");
 
+// RTC_NOINIT survives deep sleep and reset/panic (unlike RTC_DATA_ATTR); power loss leaves
+// garbage, which the magic check in rtc_begin turns into a cold boot.
 RTC_NOINIT_ATTR static wake::Rtc g_rtc;
 static wake::Work g_work;  // frame + caches + scratch (~75 KB): static, never on the stack
 static char g_version[40];
@@ -118,8 +124,9 @@ void setup() {
 void loop() {
   const int32_t sleep_s =
       wake::run_cycle(g_ops, g_rtc, g_work, FRAME_QUERY, g_version, USE_CALIBRATION_PATTERN, FALLBACK_SLEEP_S);
-  Serial.printf("heap: free %u, min %u\n", static_cast<unsigned>(ESP.getFreeHeap()),
-                static_cast<unsigned>(ESP.getMinFreeHeap()));
+  Serial.printf("heap: free %u, min %u; loop stack high-water %u bytes free\n",
+                static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMinFreeHeap()),
+                static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
   const uint32_t start = millis();
   const int64_t total_ms = static_cast<int64_t>(sleep_s) * 1000;
   bool announced = false;

@@ -2,6 +2,8 @@
 # Regenerate include/ca_certs.h from the system trust store (spec §2.6): the roots that
 # api.open-meteo.com and api.stlouisfed.org chain to. Check them when regenerating:
 #   openssl s_client -connect <host>:443 -servername <host> -showcerts </dev/null | grep -E '^ *i:'
+set -euo pipefail
+cd "$(dirname "$0")/.."
 certs=(ISRG_Root_X1 DigiCert_Global_Root_G3)
 {
   echo "#pragma once"
