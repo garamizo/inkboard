@@ -56,6 +56,8 @@ gen-fonts:
     uv run tools/gen_fonts.py
 gen-tz:
     uv run tools/gen_tz_table.py
+gen-ca-certs:
+    bash tools/gen_ca_certs.sh
 gen-primitives:
     uv run tools/ref_primitives.py
 record-fixtures:

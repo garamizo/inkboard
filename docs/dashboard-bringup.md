@@ -17,9 +17,9 @@ Checks the firmware on real hardware. Do them in order; record results in the ta
 - If uploads succeed but the board never starts the firmware (serial shows only
   `wait usb download`), it's stuck in the USB downloader: tap RESET. See the troubleshooting
   table in `docs/smoke-test.md`.
-- RESET (or a re-flash) keeps the board's wake state, so it behaves like an early timer wake.
-  Unplugging the power clears that state: the first successful wake after power-up redraws
-  the stored frame once, because the board can't know what the panel shows.
+- After a power-on or RESET (the C6 reports the RESET pin as power-on) the clock is unknown and
+  the panel counts as dirty. The first wake syncs the clock (SNTP), renders from the caches in
+  flash (fetching only what is due) and redraws the panel once.
 - Press RESET to run a wake immediately. The shortest wait between wakes is 300 s
   (`wake::MIN_SLEEP_S`).
 
@@ -39,16 +39,16 @@ show the weather and FRED fetches succeeding and then `sleeping <s> s`.
 Press RESET within the same data cycle (a few minutes after step 2). Serial should show no
 fetches (the caches in flash are fresh), and the panel shows the same dashboard.
 
-## 4. Offline badge
-Turn off the Wi-Fi router and let the board wake three times.
-- That takes 5 + 15 + 60 min; pressing RESET runs a wake immediately.
-- On the third failure the **"offline since h:mm"** badge appears bottom-right, over the
-  intact last dashboard.
-- Power-cycle the board (unplug it) while it's still offline. The stored frame survives,
-  and after three more failures the badge is drawn over it again. Its time now says just
-  "offline", because RTC memory was lost.
-Turn the Wi-Fi back on, then press RESET: the next wake redraws the clean frame without the
-badge.
+## 4. Offline and stale
+Turn off the Wi-Fi router after a successful update and press RESET (or wait for wakes) to
+run wakes offline. Expected panel behaviour:
+- Offline for less than 2 h: the same frame, no panel refresh.
+- Offline for 2 h or more: `⚠ stale` appears in the footer, with one refresh.
+- Offline past midnight: the date and month grid change, drawn from cached data.
+- First boot offline (clock unknown, e.g. power-cycle with the router off): the panel is
+  left untouched and the board retries after 5, 15, then 60 min.
+Turn the Wi-Fi back on and press RESET: the next wake fetches fresh data and the `⚠ stale`
+mark disappears.
 
 ## 5. Config error
 Set `FRAME_QUERY` to `"w=market_trends:2/3"` and flash. The error screen shows
@@ -69,6 +69,6 @@ Record both in `docs/hardware.md` (Design notes for battery life).
 | 1 Orientation | | | |
 | 2 First frame | | | |
 | 3 Cached data | | | |
-| 4 Offline badge | | | |
+| 4 Offline and stale | | | |
 | 5 Config error | | | |
 | 6 Power | | | |

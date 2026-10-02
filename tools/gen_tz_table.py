@@ -91,7 +91,7 @@ def footer(name: str) -> str | None:
     return None
 
 
-def next_top_of_hour(now: datetime, tz) -> datetime:  # server/inkboard_server/schedule.py
+def next_top_of_hour(now: datetime, tz) -> datetime:  # port of the removed Python server's schedule.py
     t = now.astimezone(timezone.utc).replace(second=0, microsecond=0)
     t = t.replace(minute=t.minute - t.minute % 15)
     while True:

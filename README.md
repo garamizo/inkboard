@@ -98,7 +98,7 @@ layout only needs a reflash.
    (dollar index).
 3. **Preview it on this computer:** `just preview` (or `just preview "<query>"`) writes
    `.pio/preview.png`. A mistake prints a one-line error instead (e.g. `lat: not used by any
-   widget in w`). `just preview "" --fixtures` renders offline from recorded data; to pass
+   widget in w`). Live data needs `FRED_API_KEY` (environment or `include/secrets.h`). `just preview "" --fixtures` renders offline from recorded data; to pass
    several flags, quote them as one string: `just preview "" "--fixtures --out x.png"`.
 4. **Flash** with `just flash`. The new layout shows on the next update.
 
@@ -127,6 +127,7 @@ src/                 dashboard firmware: Wi-Fi, TLS, clock, display, deep sleep 
 extras/smoke/        hardware smoke test + refresh soak test (pio run -e smoke)
 extras/minimal/      bare display check (pio run -e minimal), mirrors the kit's firmware
 tools/               generators: fonts, time-zone table, fixtures, Pillow reference images
+                     and gen_ca_certs.sh (regenerate include/ca_certs.h when an API's certificate chain changes)
 test/                host test suites, recorded fixtures, golden PNGs, reference images
 docs/
   hardware.md        what each board does, how the e-paper HAT works
