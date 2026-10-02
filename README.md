@@ -136,10 +136,23 @@ docs/
   toolchain.md       language / framework choice and commands
 ```
 
+## Upgrading from 1.x
+
+1.x rendered on a server; 2.x renders on the board. To upgrade:
+
+1. Add `FRED_API_KEY` to `include/secrets.h` (see `include/secrets.h.example`). The build stops with a
+   message if the layout uses `market_trends` and the key is missing.
+2. Reflash with `just flash`. Old flash files are cleaned up automatically.
+
+If you ran the public server: the compose file is gone from `main`. Stop it from tag
+`server-render-final` (`git checkout server-render-final && just down`) or with `docker compose down`
+in that checkout.
+
 ## Roadmap
 
 - [x] Hardware smoke test
-- [ ] Wi-Fi provisioning + NTP clock
+- [x] NTP clock (SNTP on every wake)
+- [ ] Wi-Fi provisioning
 - [x] Dashboard layout engine (widgets rendered on the board)
 - [x] Data sources (FRED markets, Open-Meteo weather, fetched by the board)
 - [x] Deep-sleep update cycle (battery voltage still to do)

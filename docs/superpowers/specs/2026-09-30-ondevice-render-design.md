@@ -260,7 +260,7 @@ error screen, calibration) uses it, so a reset mid-refresh leaves the panel dirt
 | Offline ≥ 2 h | `⚠ stale` in the footer (weather past TTL + 90 min); one refresh |
 | Offline past midnight | New date and month grid from cached data; forecast rows by date |
 | FRED down, weather OK | Chart from cache; `⚠ stale` after 6 h + 90 min |
-| FRED key wrong or missing | Market column: "FRED API key rejected: check secrets.h"; weather unaffected |
+| FRED key wrong or missing | Market column: "FRED key rejected:" / "check secrets.h" (two lines); weather unaffected |
 | First boot offline (no clock) | Panel untouched; back-off retries |
 | Clock valid, no cache, fetch failed | "No data yet: \<source\>" in that column |
 | Bad `FRAME_QUERY` | Config error screen with the reason and the query |
@@ -349,3 +349,11 @@ last; the long battery run was skipped.
 | RESET (power-on, clock lost) | SNTP resynced the clock; no fetches (caches fresh from LittleFS); panel redrawn (cold boot is dirty) |
 | Production build with a computer on USB | stays awake ("computer on USB"), schedules hh:01; deep sleep starts once unplugged |
 | Firmware size | RAM 164,928 B (50.3 %), Flash 1,414,972 / 1,966,080 B (72.0 %) |
+
+Task 19 failure-table rows (Wi-Fi off, bad FRED key, bad query, cold boot offline, calibration) were not
+run on hardware, at the owner's request to save time. Those paths are covered by the host cycle tests in
+`test/test_logic`: `test_offline_keeps_frame_until_stale`, `test_cold_boot_offline_leaves_panel_alone`,
+`test_fred_auth_rejected_stops_after_first`, `test_bad_query_shows_error_once`, and the tail path by
+`test_fred_ttl_wake_fetches_tails`.
+
+Deep-sleep timer wake on the production build: pending the owner's observation of the 22:01 wake.

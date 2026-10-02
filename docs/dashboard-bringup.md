@@ -5,7 +5,9 @@ Checks the firmware on real hardware. Do them in order; record results in the ta
 **Before you start:**
 - `include/secrets.h` has your Wi-Fi credentials and your FRED API key (copy it from
   `include/secrets.h.example`; the key is free at https://fredaccount.stlouisfed.org/apikeys).
-- The serial monitor shows `sleeping <s> s` after each wake.
+- With a computer on USB the serial monitor shows `computer on USB: staying awake, next update in N s`
+  after each wake (dev build: `deep sleep off (dev build): staying awake, next update in N s`);
+  `sleeping <s> s` appears only when the board deep-sleeps (on battery or a charger).
 - `just flash-dev` builds with deep sleep **off** (`INKBOARD_DEEP_SLEEP=0`): the dev board
   waits awake between updates, so USB and logs are always there. Prod (`just flash`) keeps
   deep sleep on.
@@ -33,22 +35,24 @@ Then set `USE_CALIBRATION_PATTERN 0` again.
 
 ## 2. First frame
 Flash again. The panel should match `just preview` (`.pio/preview.png`), and serial should
-show the weather and FRED fetches succeeding and then `sleeping <s> s`.
+show the weather and FRED fetches succeeding and then `computer on USB: staying awake, next update
+in N s` (dev build: `deep sleep off (dev build): staying awake, next update in N s`).
 
 ## 3. Cached data
 Press RESET within the same data cycle (a few minutes after step 2). Serial should show no
 fetches (the caches in flash are fresh), and the panel shows the same dashboard.
 
 ## 4. Offline and stale
-Turn off the Wi-Fi router after a successful update and press RESET (or wait for wakes) to
-run wakes offline. Expected panel behaviour:
+Wait for a successful update, then turn off the Wi-Fi router (the board cannot be pointed at a wrong
+SSID without a reflash). Do **not** press RESET: it loses the clock, and a board without a clock
+and without Wi-Fi never renders. Let the scheduled wakes run offline. Expected panel behaviour:
 - Offline for less than 2 h: the same frame, no panel refresh.
 - Offline for 2 h or more: `⚠ stale` appears in the footer, with one refresh.
 - Offline past midnight: the date and month grid change, drawn from cached data.
-- First boot offline (clock unknown, e.g. power-cycle with the router off): the panel is
-  left untouched and the board retries after 5, 15, then 60 min.
-Turn the Wi-Fi back on and press RESET: the next wake fetches fresh data and the `⚠ stale`
-mark disappears.
+Turn the Wi-Fi back on: the next wake fetches fresh data and the `⚠ stale` mark disappears.
+
+Test a cold boot offline separately: with the router off, press RESET. The panel is left untouched
+and the board retries after 5, 15, then 60 min. Turn the router on again and press RESET to recover.
 
 ## 5. Config error
 Set `FRAME_QUERY` to `"w=market_trends:2/3"` and flash. The error screen shows
@@ -61,6 +65,12 @@ Measure the current with a USB power meter or a meter on B+:
 - awake per cycle: ___ s at ___ mA
 
 Record both in `docs/hardware.md` (Design notes for battery life).
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `⚠ stale` never clears and the log shows TLS or `HTTP -1` errors | An API's certificate chain changed: run `just gen-ca-certs`, then reflash |
 
 ## Results
 
